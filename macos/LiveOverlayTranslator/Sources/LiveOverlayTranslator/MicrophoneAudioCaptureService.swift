@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 import LiveOverlayTranslatorCore
 
-final class MicrophoneAudioCaptureService: AudioCaptureService {
+final class MicrophoneAudioCaptureService: AudioCaptureService, @unchecked Sendable {
     let source: AudioSource = .microphone
     private let engine = AVAudioEngine()
     private let resampler: PCMResampler

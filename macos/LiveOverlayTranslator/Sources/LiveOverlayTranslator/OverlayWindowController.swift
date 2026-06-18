@@ -88,11 +88,15 @@ struct OverlayView: View {
     private var statusText: some View {
         switch state.connectionStatus {
         case .disconnected:
-            Text("Mock mode")
+            Text("Idle")
         case .connected:
             Text("Connected")
         case let .degraded(reason):
             Text("Recovering: \(reason)")
+        case .closed:
+            Text("Closed")
+        case let .failed(code):
+            Text("Failed: \(code)")
         }
     }
 }

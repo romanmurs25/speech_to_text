@@ -22,4 +22,5 @@ public enum AudioCaptureError: Error, Equatable {
     case microphonePermissionDenied
     case screenRecordingPermissionDenied
     case deviceUnavailable
+    case systemAudioUnavailable
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ClientSessionManager } from "../src/ws/ClientSessionManager.js";
 import { MockOpenAIResponsesClient } from "../src/openai/MockOpenAIResponsesClient.js";
 import type { RealtimeTranscriptionClient } from "../src/openai/OpenAIRealtimeTranscriptionClient.js";
+import type { FinalUtteranceEnvelope, OverlayResult } from "../src/protocol/schemas.js";
 
 describe("ClientSessionManager", () => {
   it("runs the mock utterance flow from completed transcript to overlay result", async () => {
@@ -20,7 +21,7 @@ describe("ClientSessionManager", () => {
     });
     manager.handleControl({
       type: "start_stream",
-      source: "systemAudio",
+      source: "microphone",
       sample_rate: 24000,
       channels: 1,
       encoding: "pcm_s16le",
@@ -29,8 +30,8 @@ describe("ClientSessionManager", () => {
     manager.handleControl({
       type: "utterance_start",
       client_utterance_id: "client-1",
-      source: "systemAudio",
-      speaker: "remote",
+      source: "microphone",
+      speaker: "local",
       sequence: 1,
       started_at_ms: 100
     });
@@ -54,7 +55,7 @@ describe("ClientSessionManager", () => {
       sequence: 1,
       result: {
         utterance_id: "mock-item-1",
-        reply_needed: true
+        original_text: "Could you send me the revised proposal by Friday?"
       }
     });
   });
@@ -76,8 +77,8 @@ describe("ClientSessionManager", () => {
     manager.handleControl({
       type: "utterance_start",
       client_utterance_id: "client-1",
-      source: "systemAudio",
-      speaker: "remote",
+      source: "microphone",
+      speaker: "local",
       sequence: 1,
       started_at_ms: 100
     });
@@ -104,28 +105,18 @@ describe("ClientSessionManager", () => {
     ]);
   });
 
-  it("routes audio and commit only to the utterance source Realtime client", async () => {
+  it("routes audio and commit to the active microphone Realtime client", async () => {
     const microphoneClient = new RecordingRealtimeClient();
-    const systemAudioClient = new RecordingRealtimeClient();
     const manager = new ClientSessionManager({
       mockMode: false,
       overlayResponseClient: new MockOpenAIResponsesClient(),
       send: () => {},
-      realtimeClientFactory: (message) =>
-        message.source === "microphone" ? microphoneClient : systemAudioClient
+      realtimeClientFactory: () => microphoneClient
     });
 
     await manager.handleControl({
       type: "start_stream",
       source: "microphone",
-      sample_rate: 24000,
-      channels: 1,
-      encoding: "pcm_s16le",
-      language_hint: null
-    });
-    await manager.handleControl({
-      type: "start_stream",
-      source: "systemAudio",
       sample_rate: 24000,
       channels: 1,
       encoding: "pcm_s16le",
@@ -150,10 +141,193 @@ describe("ClientSessionManager", () => {
 
     expect(microphoneClient.appendedBytes).toBe(4);
     expect(microphoneClient.commits).toBe(1);
-    expect(systemAudioClient.appendedBytes).toBe(0);
-    expect(systemAudioClient.commits).toBe(0);
+  });
+
+  it("rejects overlapping utterances without overwriting active audio routing", async () => {
+    const messages: unknown[] = [];
+    const microphoneClient = new RecordingRealtimeClient();
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: new MockOpenAIResponsesClient(),
+      send: (message) => messages.push(message),
+      realtimeClientFactory: () => microphoneClient
+    });
+
+    await manager.handleControl({
+      type: "start_stream",
+      source: "microphone",
+      sample_rate: 24000,
+      channels: 1,
+      encoding: "pcm_s16le",
+      language_hint: null
+    });
+    await manager.handleControl({
+      type: "utterance_start",
+      client_utterance_id: "client-a",
+      source: "microphone",
+      speaker: "local",
+      sequence: 1,
+      started_at_ms: 100
+    });
+    await manager.handleControl({
+      type: "utterance_start",
+      client_utterance_id: "client-b",
+      source: "microphone",
+      speaker: "local",
+      sequence: 2,
+      started_at_ms: 120
+    });
+
+    manager.handleAudio(Buffer.from([1, 2, 3, 4]));
+    await manager.handleControl({
+      type: "utterance_commit",
+      client_utterance_id: "client-a",
+      sequence: 1,
+      ended_at_ms: 200
+    });
+    await manager.handleControl({
+      type: "utterance_commit",
+      client_utterance_id: "client-b",
+      sequence: 2,
+      ended_at_ms: 220
+    });
+
+    expect(messages).toContainEqual({
+      type: "recoverable_error",
+      code: "overlapping_utterance_rejected",
+      message: "Only one microphone utterance can be active at a time.",
+      client_utterance_id: "client-b"
+    });
+    expect(microphoneClient.appendedBytes).toBe(4);
+    expect(microphoneClient.commits).toBe(1);
+  });
+
+  it("rejects system audio start safely in P0 mode", async () => {
+    const messages: unknown[] = [];
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: new MockOpenAIResponsesClient(),
+      send: (message) => messages.push(message)
+    });
+
+    await manager.handleControl({
+      type: "start_stream",
+      source: "systemAudio",
+      sample_rate: 24000,
+      channels: 1,
+      encoding: "pcm_s16le",
+      language_hint: null
+    });
+
+    expect(messages).toEqual([
+      {
+        type: "recoverable_error",
+        code: "source_unavailable",
+        message: "System audio capture is not available in the P0 microphone build."
+      }
+    ]);
+  });
+
+  it("preserves completed speech in future context when translation fails", async () => {
+    const messages: unknown[] = [];
+    const overlayClient = new RecordingOverlayResponseClient([
+      Promise.reject(new Error("Responses outage")),
+      Promise.resolve(makeOverlayResult("item-2", "Second real turn"))
+    ]);
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: overlayClient,
+      send: (message) => messages.push(message)
+    });
+
+    manager.handleControl({
+      type: "hello",
+      protocol_version: 1,
+      client_version: "0.1.0",
+      session_id: "550e8400-e29b-41d4-a716-446655440000"
+    });
+    await completeRealtimeUtterance(manager, "client-1", 1, "item-1", "First real turn");
+    await completeRealtimeUtterance(manager, "client-2", 2, "item-2", "Second real turn");
+
+    expect(overlayClient.envelopes).toHaveLength(2);
+    expect(overlayClient.envelopes[0].context).toEqual([]);
+    expect(overlayClient.envelopes[1].context).toEqual([
+      { speaker: "local", text: "First real turn" }
+    ]);
+    expect(overlayClient.envelopes[1].context).not.toContainEqual({
+      speaker: "local",
+      text: "Second real turn"
+    });
+    expect(messages).toContainEqual({
+      type: "recoverable_error",
+      code: "translation_failed",
+      message: "Translation is temporarily unavailable.",
+      client_utterance_id: "client-1"
+    });
+    expect(messages).toContainEqual({
+      type: "overlay_result",
+      client_utterance_id: "client-2",
+      sequence: 2,
+      result: makeOverlayResult("item-2", "Second real turn")
+    });
   });
 });
+
+async function completeRealtimeUtterance(
+  manager: ClientSessionManager,
+  clientUtteranceId: string,
+  sequence: number,
+  itemId: string,
+  transcript: string
+): Promise<void> {
+  await manager.handleControl({
+    type: "utterance_start",
+    client_utterance_id: clientUtteranceId,
+    source: "microphone",
+    speaker: "local",
+    sequence,
+    started_at_ms: sequence * 100
+  });
+  await manager.handleControl({
+    type: "utterance_commit",
+    client_utterance_id: clientUtteranceId,
+    sequence,
+    ended_at_ms: sequence * 100 + 50
+  });
+  await manager.handleRealtimeEvent({
+    type: "input_audio_buffer.committed",
+    item_id: itemId
+  });
+  await manager.handleRealtimeEvent({
+    type: "conversation.item.input_audio_transcription.completed",
+    item_id: itemId,
+    transcript
+  });
+}
+
+function makeOverlayResult(utteranceId: string, text: string): OverlayResult {
+  return {
+    utterance_id: utteranceId,
+    detected_language: "en",
+    original_text: text,
+    translation_ru: `${text} RU`,
+    translation_en: text,
+    reply_needed: true,
+    suggested_reply_ru: "Да.",
+    suggested_reply_en: "Yes."
+  };
+}
+
+class RecordingOverlayResponseClient {
+  readonly envelopes: FinalUtteranceEnvelope[] = [];
+
+  constructor(private readonly responses: Array<Promise<OverlayResult>>) {}
+
+  createOverlayResult(envelope: FinalUtteranceEnvelope): Promise<OverlayResult> {
+    this.envelopes.push(envelope);
+    return this.responses.shift() ?? Promise.resolve(makeOverlayResult(envelope.utterance_id, envelope.source_text));
+  }
+}
 
 class RecordingRealtimeClient implements RealtimeTranscriptionClient {
   appendedBytes = 0;

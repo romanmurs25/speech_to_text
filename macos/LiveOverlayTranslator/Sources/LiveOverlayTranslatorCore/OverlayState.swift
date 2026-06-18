@@ -5,6 +5,8 @@ public enum ConnectionStatus: Equatable, Sendable {
     case disconnected
     case connected
     case degraded(String)
+    case closed
+    case failed(String)
 }
 
 public struct OverlayCard: Identifiable, Equatable, Sendable {
@@ -41,8 +43,28 @@ public final class OverlayState: ObservableObject {
 
     public init() {}
 
+    public func resetSession() {
+        cards.removeAll(keepingCapacity: true)
+        provisionalText = ""
+        pendingTranslationIDs.removeAll(keepingCapacity: true)
+        recoverableError = nil
+        provisionalByUtterance.removeAll(keepingCapacity: true)
+        connectionStatus = .disconnected
+    }
+
     public func apply(_ message: ServerMessage) {
         switch message {
+        case let .sessionState(session):
+            switch session.status {
+            case .connected, .ready:
+                connectionStatus = .connected
+                recoverableError = nil
+            case .degraded:
+                connectionStatus = .degraded("session_degraded")
+            case .closed:
+                connectionStatus = .closed
+            }
+
         case let .transcriptDelta(delta):
             provisionalByUtterance[delta.clientUtteranceID, default: ""] += delta.delta
             provisionalText = provisionalByUtterance[delta.clientUtteranceID] ?? ""
@@ -66,6 +88,10 @@ public final class OverlayState: ObservableObject {
         case let .recoverableError(error):
             recoverableError = error.message
             connectionStatus = .degraded(error.code)
+
+        case let .fatalError(error):
+            recoverableError = error.message
+            connectionStatus = .failed(error.code)
         }
     }
 

@@ -14,6 +14,7 @@
 		10A000000000000000000005 /* CleanShareCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10B000000000000000000005 /* CleanShareCoordinator.swift */; };
 		10A000000000000000000006 /* GlobalShortcutController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10B000000000000000000006 /* GlobalShortcutController.swift */; };
 		10A000000000000000000007 /* LiveOverlayTranslatorCore in Frameworks */ = {isa = PBXBuildFile; productRef = 10D000000000000000000002 /* LiveOverlayTranslatorCore */; };
+		10A000000000000000000008 /* ApplicationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10B000000000000000000010 /* ApplicationController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -26,6 +27,7 @@
 		10B000000000000000000007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = SOURCE_ROOT; };
 		10B000000000000000000008 /* LiveOverlayTranslator.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LiveOverlayTranslator.entitlements; sourceTree = SOURCE_ROOT; };
 		10B000000000000000000009 /* LiveOverlayTranslator.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LiveOverlayTranslator.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		10B000000000000000000010 /* ApplicationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplicationController.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -54,6 +56,7 @@
 			isa = PBXGroup;
 			children = (
 				10B000000000000000000001 /* LiveOverlayTranslatorApp.swift */,
+				10B000000000000000000010 /* ApplicationController.swift */,
 				10B000000000000000000002 /* OverlayWindowController.swift */,
 				10B000000000000000000003 /* MicrophoneAudioCaptureService.swift */,
 				10B000000000000000000004 /* SystemAudioCaptureService.swift */,
@@ -135,6 +138,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				10A000000000000000000001 /* LiveOverlayTranslatorApp.swift in Sources */,
+				10A000000000000000000008 /* ApplicationController.swift in Sources */,
 				10A000000000000000000002 /* OverlayWindowController.swift in Sources */,
 				10A000000000000000000003 /* MicrophoneAudioCaptureService.swift in Sources */,
 				10A000000000000000000004 /* SystemAudioCaptureService.swift in Sources */,

@@ -1,4 +1,4 @@
-import WebSocket from "ws";
+import WebSocket, { type RawData } from "ws";
 import type { Source } from "../protocol/schemas.js";
 import type { OpenAIRealtimeEvent } from "./RealtimeEventRouter.js";
 
@@ -7,6 +7,21 @@ export interface RealtimeTranscriptionClient {
   commit(): void;
   close(): void;
 }
+
+export interface RealtimeSocket {
+  readonly readyState: number;
+  send(data: string): void;
+  close(): void;
+  on(event: "open", listener: () => void): void;
+  on(event: "message", listener: (data: RawData) => void): void;
+  on(event: "error", listener: (error: Error) => void): void;
+  on(event: "close", listener: () => void): void;
+}
+
+export type RealtimeSocketFactory = (
+  url: string,
+  options: { headers: Record<string, string> }
+) => RealtimeSocket;
 
 export interface RealtimeTranscriptionClientOptions {
   apiKey: string;
@@ -17,41 +32,66 @@ export interface RealtimeTranscriptionClientOptions {
   onEvent: (event: OpenAIRealtimeEvent) => void;
   onError: (error: Error) => void;
   onDisconnect: () => void;
+  socketFactory?: RealtimeSocketFactory;
+  maxQueuedEvents?: number;
 }
 
+type RealtimeClientState =
+  | "connecting"
+  | "configuring"
+  | "ready"
+  | "intentionallyClosing"
+  | "disconnected"
+  | "failed";
+
 export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionClient {
-  private readonly socket: WebSocket;
+  private readonly socket: RealtimeSocket;
+  private readonly maxQueuedEvents: number;
+  private readonly queuedEvents: unknown[] = [];
+  private state: RealtimeClientState = "connecting";
 
   constructor(private readonly options: RealtimeTranscriptionClientOptions) {
     const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(options.model)}`;
-    this.socket = new WebSocket(url, {
+    const socketFactory =
+      options.socketFactory ??
+      ((socketUrl, socketOptions) => new WebSocket(socketUrl, socketOptions));
+    this.socket = socketFactory(url, {
       headers: {
         Authorization: `Bearer ${options.apiKey}`
       }
     });
+    this.maxQueuedEvents = options.maxQueuedEvents ?? 128;
 
     this.socket.on("open", () => this.configureSession());
     this.socket.on("message", (data) => this.handleMessage(data));
-    this.socket.on("error", (error) => options.onError(error));
-    this.socket.on("close", () => options.onDisconnect());
+    this.socket.on("error", (error) => {
+      this.state = "failed";
+      options.onError(error);
+    });
+    this.socket.on("close", () => this.handleClose());
   }
 
   appendAudio(pcm: Buffer): void {
-    this.send({
+    this.sendWhenReady({
       type: "input_audio_buffer.append",
       audio: pcm.toString("base64")
     });
   }
 
   commit(): void {
-    this.send({ type: "input_audio_buffer.commit" });
+    this.sendWhenReady({ type: "input_audio_buffer.commit" });
   }
 
   close(): void {
+    if (this.state === "disconnected" || this.state === "intentionallyClosing") {
+      return;
+    }
+    this.state = "intentionallyClosing";
     this.socket.close();
   }
 
   private configureSession(): void {
+    this.state = "configuring";
     const transcription: Record<string, unknown> = {
       model: this.options.model,
       delay: this.options.delay
@@ -60,7 +100,7 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
       transcription.language = this.options.languageHint;
     }
 
-    this.send({
+    this.sendImmediately({
       type: "session.update",
       session: {
         type: "transcription",
@@ -78,17 +118,83 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
     });
   }
 
-  private handleMessage(data: WebSocket.RawData): void {
+  private handleMessage(data: RawData): void {
     try {
-      this.options.onEvent(JSON.parse(data.toString()) as OpenAIRealtimeEvent);
+      const event = JSON.parse(data.toString()) as OpenAIRealtimeEvent;
+      if (event.type === "session.updated") {
+        this.state = "ready";
+        this.options.onEvent(event);
+        this.flushQueuedEvents();
+        return;
+      }
+
+      if (event.type === "error") {
+        this.state = "failed";
+        this.options.onError(new Error(readRealtimeErrorMessage(event)));
+        return;
+      }
+
+      this.options.onEvent(event);
     } catch (error) {
       this.options.onError(error instanceof Error ? error : new Error(String(error)));
     }
   }
 
-  private send(event: unknown): void {
-    if (this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify(event));
+  private sendWhenReady(event: unknown): void {
+    if (this.state === "ready") {
+      this.sendImmediately(event);
+      return;
+    }
+
+    if (this.state === "connecting" || this.state === "configuring") {
+      this.enqueueEvent(event);
+      return;
+    }
+
+    this.options.onError(new Error("Realtime transcription is not connected."));
+  }
+
+  private enqueueEvent(event: unknown): void {
+    if (this.queuedEvents.length >= this.maxQueuedEvents) {
+      this.queuedEvents.length = 0;
+      this.state = "failed";
+      this.options.onError(new Error("Realtime readiness queue overflow."));
+      return;
+    }
+
+    this.queuedEvents.push(event);
+  }
+
+  private flushQueuedEvents(): void {
+    const events = this.queuedEvents.splice(0);
+    for (const event of events) {
+      this.sendImmediately(event);
     }
   }
+
+  private sendImmediately(event: unknown): void {
+    if (this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(event));
+      return;
+    }
+
+    this.options.onError(new Error("Realtime socket is not open."));
+  }
+
+  private handleClose(): void {
+    const wasIntentional = this.state === "intentionallyClosing";
+    this.state = "disconnected";
+    this.queuedEvents.length = 0;
+    if (!wasIntentional) {
+      this.options.onDisconnect();
+    }
+  }
+}
+
+function readRealtimeErrorMessage(event: OpenAIRealtimeEvent): string {
+  const error = "error" in event && typeof event.error === "object" ? event.error : null;
+  if (error && "message" in error && typeof error.message === "string") {
+    return error.message;
+  }
+  return "OpenAI Realtime reported an error.";
 }

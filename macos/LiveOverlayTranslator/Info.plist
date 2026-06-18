@@ -23,7 +23,12 @@
     <key>NSMicrophoneUsageDescription</key>
     <string>LiveOverlayTranslator needs microphone access to transcribe local speech.</string>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>LiveOverlayTranslator needs screen recording access for system audio and Clean Share mode.</string>
+    <string>Reserved for future system audio and Clean Share support; the P0 build uses microphone input only.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>

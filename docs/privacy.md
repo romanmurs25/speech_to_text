@@ -3,13 +3,12 @@
 ## Where Audio Travels
 
 1. Microphone audio is captured locally by the macOS app after the user grants microphone permission.
-2. System audio or display capture is captured locally through ScreenCaptureKit after the user grants screen-recording permission.
-3. The macOS app converts audio to PCM S16LE mono 24 kHz.
-4. During an active stream, audio chunks travel from the macOS app to the configured backend WebSocket.
-5. The backend forwards audio chunks to an OpenAI Realtime transcription session.
-6. In-memory audio buffers are cleared after commit, interruption, or failure.
+2. The macOS app converts microphone audio to PCM S16LE mono 24 kHz.
+3. During an active stream, small audio frames travel from the macOS app to the configured backend WebSocket.
+4. The backend forwards audio frames to an OpenAI Realtime transcription session.
+5. In-memory audio buffers are cleared after commit, interruption, or failure.
 
-Raw audio is not written to disk by this project and is not logged.
+Raw audio is not written to disk by this project and is not logged. System audio capture is unavailable in the P0 microphone build.
 
 ## Where Text Travels
 
@@ -30,16 +29,16 @@ Responses API calls set `store: false`. The backend uses explicit verified conte
 
 ## Clean Share Mode
 
-Clean Share creates a separate ScreenCaptureKit feed window and excludes every window owned by LiveOverlayTranslator where possible. The SAFE SHARE indicator appears only while that clean stream is running.
+Clean Share is not implemented in the P0 microphone build. The app does not create an `SCContentFilter`, `SCStream`, output handler, frame renderer, or clean capture stream.
 
-The user must share the `LiveOverlayTranslator - Clean Feed` window in Zoom, Google Meet, Teams, or another conference app. If the user shares the physical Entire Screen source, LiveOverlayTranslator cannot forcibly hide its overlay from that third-party capture.
+Do not rely on LiveOverlayTranslator to hide the overlay from screen sharing. If the user shares the physical Entire Screen source in Zoom, Google Meet, Teams, or another conference app, the overlay can be exposed.
 
 ## Permissions
 
 macOS prompts for:
 
 - microphone access for microphone transcription;
-- screen recording for system audio/display capture and Clean Share;
+- screen recording only in future builds that implement system audio or Clean Share;
 - accessibility access only if future global shortcut implementations require it beyond Carbon hotkeys.
 
 The UI explains why each permission is requested before opening the relevant system permission flow.

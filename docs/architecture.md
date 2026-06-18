@@ -9,10 +9,9 @@ The backend is the only component that owns `OPENAI_API_KEY`. The macOS app talk
 ## Data Flow
 
 1. The macOS app starts a client session and sends a `hello` control message to the backend WebSocket.
-2. The selected audio source starts:
+2. The selected P0 audio source starts:
    - `microphone` uses `MicrophoneAudioCaptureService` and labels speech as `local`.
-   - `systemAudio` uses `SystemAudioCaptureService` and labels speech as `remote`.
-   - `both` runs one independent stream per source so overlapping speakers are not mixed.
+   - `systemAudio` is unavailable in the current app UI and fails safely if called internally.
 3. Captured audio is converted to PCM S16LE, mono, 24 kHz by `PCMResampler`.
 4. `SpeechEndpointDetector` maintains an adaptive noise floor, pre-roll, start confirmation, phrase-ending silence, maximum duration, and minimum non-silent duration.
 5. `AudioStreamCoordinator` sends:
@@ -21,7 +20,7 @@ The backend is the only component that owns `OPENAI_API_KEY`. The macOS app talk
    - binary PCM audio frames
    - `utterance_commit`
 6. The backend validates JSON control messages with Zod in `ClientProtocolValidator`.
-7. `ClientSessionManager` owns one `OpenAIRealtimeTranscriptionClient` per logical source.
+7. `ClientSessionManager` owns one active microphone Realtime transcription client for the P0 stream.
 8. The backend forwards PCM chunks to OpenAI Realtime using `input_audio_buffer.append`, then commits local endpointed phrases using `input_audio_buffer.commit`.
 9. `UtteranceCorrelationStore` maps pending client utterance IDs to OpenAI item IDs when OpenAI acknowledges committed audio.
 10. `RealtimeEventRouter` emits provisional `transcript_delta` messages as subdued overlay text.
@@ -30,13 +29,13 @@ The backend is the only component that owns `OPENAI_API_KEY`. The macOS app talk
 13. `OverlayResponseService` deduplicates by `session_id` plus `utterance_id`, calls `OpenAIResponsesClient`, and emits an `overlay_result`.
 14. `OverlayState` applies deltas, completions, and overlay results using utterance IDs and sequence numbers so stale results cannot overwrite newer cards.
 15. `OverlayWindowController` displays the SwiftUI overlay in an `NSPanel`.
-16. `CleanShareCoordinator` can create a ScreenCaptureKit clean feed window that excludes all windows owned by LiveOverlayTranslator. The app never claims that it can hide overlays from unrelated third-party full-screen capture.
+16. `CleanShareCoordinator` is unavailable in P0 and must not claim screen-share safety until a real `SCContentFilter`, `SCStream`, output handler, renderer, and started capture exist.
 
 ## macOS Component Boundaries
 
 - `AudioCaptureService`: common protocol for source-specific audio capture.
 - `MicrophoneAudioCaptureService`: AVFoundation microphone capture, permission checks, and device-change handling.
-- `SystemAudioCaptureService`: ScreenCaptureKit system audio/display capture boundary. The first vertical slice ships the abstraction and permission surface; production system-audio expansion can be added behind this protocol.
+- `SystemAudioCaptureService`: unavailable P0 stub; future system-audio expansion can be added behind `AudioCaptureService`.
 - `PCMResampler`: converts samples to mono 24 kHz PCM S16LE.
 - `SpeechEndpointDetector`: replaceable local speech boundary detector.
 - `EnergySpeechEndpointDetector`: initial detector with settings-driven thresholds and pre-roll.
@@ -46,7 +45,7 @@ The backend is the only component that owns `OPENAI_API_KEY`. The macOS app talk
 - `DialogueStore`: stores only verified finalized real speech turns.
 - `OverlayState`: main-thread app state, stale-result protection, mock mode.
 - `OverlayWindowController`: non-activating translucent `NSPanel`.
-- `CleanShareCoordinator`: ScreenCaptureKit display capture, self-window exclusion, clean feed state, diagnostics.
+- `CleanShareCoordinator`: unavailable P0 stub; future Clean Share must implement ScreenCaptureKit filtering, stream output, rendering, diagnostics, and lifecycle cleanup before exposing a start control.
 - `GlobalShortcutController`: global hide/show and emergency-hide hotkeys.
 
 ## Server Component Boundaries
@@ -69,7 +68,7 @@ JSON control messages and binary PCM audio frames share one connection. Producti
 
 - Realtime transcription uses the GA Realtime WebSocket API with a transcription session and `gpt-realtime-whisper`.
 - The app performs local endpoint detection, so server-side Realtime turn detection is omitted or explicitly set to null.
-- Every source gets an independent Realtime transcription session.
+- The P0 app exposes one microphone Realtime transcription session. Simultaneous microphone/system-audio multiplexing needs a future protocol change because binary audio frames currently have no stream identifier.
 - Audio chunks are appended as base64 PCM16. Local utterance boundaries trigger `input_audio_buffer.commit`.
 - Completion reconciliation uses OpenAI `item_id`, not arrival order.
 - Translation and reply generation use the Responses API with Structured Outputs, `store: false`, `reasoning.effort: none`, and an overrideable text model defaulting to `gpt-5.4-mini`.
@@ -84,7 +83,7 @@ JSON control messages and binary PCM audio frames share one connection. Producti
 - Transcript text and API credentials are redacted by default.
 - Responses requests set `store: false`.
 - In-memory audio buffers are cleared after commit, interruption, or failure.
-- The Clean Feed only protects the share flow where the user shares the generated Clean Feed window. It does not control a conference app that captures the physical display directly.
+- Clean Share is not implemented. Sharing the physical Entire Screen source can expose the overlay.
 
 ## Error Handling
 
@@ -113,4 +112,4 @@ Reconnect uses bounded backoff with jitter. The app does not automatically repla
 4. System audio capture, independent local and remote streams, timestamp ordering.
 5. Clean Share capture, self-window exclusion, emergency hide shortcut, diagnostics, and permission UX.
 
-This repository implements a working vertical slice across phases 1, 2, and selected phase 3 and phase 5 boundaries: backend mock mode and protocol tests, real Responses client boundary, Swift overlay state and NSPanel shell, endpoint detector tests, microphone-capture scaffolding, Realtime client boundary, and Clean Share ScreenCaptureKit coordinator shell.
+This repository implements a P0 microphone vertical slice across phases 1, 2, and selected phase 3: backend mock mode and protocol tests, real Responses client boundary, Swift overlay state and NSPanel shell, endpoint detector tests, microphone capture, bounded PCM streaming, Realtime client readiness handling, and explicit unavailable states for system audio and Clean Share.

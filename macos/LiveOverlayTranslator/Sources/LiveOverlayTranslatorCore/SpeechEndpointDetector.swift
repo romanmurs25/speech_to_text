@@ -21,8 +21,10 @@ public struct DetectedUtterance: Equatable, Sendable {
 }
 
 public enum SpeechEndpointEvent: Equatable, Sendable {
-    case started(preRollSamples: [Int16])
-    case ended(DetectedUtterance)
+    case speechStarted(startedAtMs: Int, initialSamples: [Int16])
+    case speechSamples([Int16])
+    case speechEnded(endedAtMs: Int)
+    case utteranceDiscarded(reason: String)
 }
 
 public protocol SpeechEndpointDetector {
@@ -41,7 +43,6 @@ public final class EnergySpeechEndpointDetector: SpeechEndpointDetector {
     private var noiseFloor: Double
     private var preRoll: [Int16] = []
     private var pendingSpeech: [Int16] = []
-    private var currentUtterance: [Int16] = []
     private var speechStartCandidateMs: Int?
     private var utteranceStartedAtMs: Int?
     private var silenceStartedAtMs: Int?
@@ -76,10 +77,9 @@ public final class EnergySpeechEndpointDetector: SpeechEndpointDetector {
                 pendingSpeech.append(contentsOf: samples)
                 nonSilentSamples += samples.count
                 if durationMs(forSampleCount: pendingSpeech.count) >= settings.speechStartConfirmationMs {
-                    let start = max(0, timestampMs - durationMs(forSampleCount: preRoll.count))
+                    let start = max(0, (speechStartCandidateMs ?? timestampMs) - durationMs(forSampleCount: preRoll.count))
                     utteranceStartedAtMs = start
-                    currentUtterance = preRoll + pendingSpeech
-                    events.append(.started(preRollSamples: currentUtterance))
+                    events.append(.speechStarted(startedAtMs: start, initialSamples: preRoll + pendingSpeech))
                     preRoll.removeAll(keepingCapacity: true)
                     pendingSpeech.removeAll(keepingCapacity: true)
                     state = .speech
@@ -91,7 +91,7 @@ public final class EnergySpeechEndpointDetector: SpeechEndpointDetector {
             }
 
         case .speech:
-            currentUtterance.append(contentsOf: samples)
+            events.append(.speechSamples(samples))
             if isSpeech {
                 silenceStartedAtMs = nil
                 nonSilentSamples += samples.count
@@ -99,19 +99,18 @@ public final class EnergySpeechEndpointDetector: SpeechEndpointDetector {
                 if silenceStartedAtMs == nil {
                     silenceStartedAtMs = timestampMs
                 }
-                let silenceDuration = chunkEndMs - (silenceStartedAtMs ?? timestampMs)
-                let utteranceDuration = chunkEndMs - (utteranceStartedAtMs ?? timestampMs)
-                if silenceDuration >= settings.phraseEndingSilenceMs ||
-                    utteranceDuration >= settings.maximumUtteranceDurationMs {
-                    if durationMs(forSampleCount: nonSilentSamples) >= settings.minimumNonSilentUtteranceMs {
-                        events.append(.ended(DetectedUtterance(
-                            samples: currentUtterance,
-                            startedAtMs: utteranceStartedAtMs ?? timestampMs,
-                            endedAtMs: chunkEndMs
-                        )))
-                    }
-                    resetAfterUtterance()
+            }
+
+            let silenceDuration = chunkEndMs - (silenceStartedAtMs ?? chunkEndMs)
+            let utteranceDuration = chunkEndMs - (utteranceStartedAtMs ?? timestampMs)
+            if silenceDuration >= settings.phraseEndingSilenceMs ||
+                utteranceDuration >= settings.maximumUtteranceDurationMs {
+                if durationMs(forSampleCount: nonSilentSamples) >= settings.minimumNonSilentUtteranceMs {
+                    events.append(.speechEnded(endedAtMs: chunkEndMs))
+                } else {
+                    events.append(.utteranceDiscarded(reason: "minimum_speech_duration_not_met"))
                 }
+                resetAfterUtterance(trailingPreRoll: isSpeech ? [] : samples)
             }
         }
 
@@ -122,7 +121,6 @@ public final class EnergySpeechEndpointDetector: SpeechEndpointDetector {
         state = .idle
         preRoll.removeAll(keepingCapacity: true)
         pendingSpeech.removeAll(keepingCapacity: true)
-        currentUtterance.removeAll(keepingCapacity: true)
         speechStartCandidateMs = nil
         utteranceStartedAtMs = nil
         silenceStartedAtMs = nil
@@ -130,14 +128,15 @@ public final class EnergySpeechEndpointDetector: SpeechEndpointDetector {
         noiseFloor = settings.initialNoiseFloor
     }
 
-    private func resetAfterUtterance() {
+    private func resetAfterUtterance(trailingPreRoll: [Int16] = []) {
         state = .idle
         pendingSpeech.removeAll(keepingCapacity: true)
-        currentUtterance.removeAll(keepingCapacity: true)
         speechStartCandidateMs = nil
         utteranceStartedAtMs = nil
         silenceStartedAtMs = nil
         nonSilentSamples = 0
+        preRoll.removeAll(keepingCapacity: true)
+        appendPreRoll(trailingPreRoll)
     }
 
     private func appendPreRoll(_ samples: [Int16]) {

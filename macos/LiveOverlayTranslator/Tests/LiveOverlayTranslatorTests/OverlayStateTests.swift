@@ -3,6 +3,30 @@ import Testing
 
 @MainActor
 @Test
+func appliesSessionStateAndFatalErrorTransitions() {
+    let state = OverlayState()
+    state.apply(.sessionState(SessionStateMessage(
+        status: .ready,
+        sessionID: UUID(uuidString: "550E8400-E29B-41D4-A716-446655440000")!
+    )))
+    #expect(state.connectionStatus == .connected)
+
+    state.apply(.sessionState(SessionStateMessage(
+        status: .closed,
+        sessionID: UUID(uuidString: "550E8400-E29B-41D4-A716-446655440000")!
+    )))
+    #expect(state.connectionStatus == .closed)
+
+    state.apply(.fatalError(FatalErrorMessage(
+        code: "protocol_violation",
+        message: "Malformed client message."
+    )))
+    #expect(state.connectionStatus == .failed("protocol_violation"))
+    #expect(state.recoverableError == "Malformed client message.")
+}
+
+@MainActor
+@Test
 func staleResultForUnknownUtteranceDoesNotOverwriteNewerCard() {
     let state = OverlayState()
     state.apply(.transcriptCompleted(TranscriptCompleted(

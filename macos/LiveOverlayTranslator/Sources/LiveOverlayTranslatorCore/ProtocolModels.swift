@@ -317,26 +317,64 @@ public struct RecoverableErrorMessage: Codable, Equatable, Sendable {
     }
 }
 
+public enum SessionStatus: String, Codable, Equatable, Sendable {
+    case connected
+    case ready
+    case degraded
+    case closed
+}
+
+public struct SessionStateMessage: Codable, Equatable, Sendable {
+    public let status: SessionStatus
+    public let sessionID: UUID
+
+    public init(status: SessionStatus, sessionID: UUID) {
+        self.status = status
+        self.sessionID = sessionID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case sessionID = "session_id"
+    }
+}
+
+public struct FatalErrorMessage: Codable, Equatable, Sendable {
+    public let code: String
+    public let message: String
+
+    public init(code: String, message: String) {
+        self.code = code
+        self.message = message
+    }
+}
+
 public enum ServerMessage: Codable, Equatable, Sendable {
+    case sessionState(SessionStateMessage)
     case transcriptDelta(TranscriptDelta)
     case transcriptCompleted(TranscriptCompleted)
     case overlayResult(OverlayResultMessage)
     case recoverableError(RecoverableErrorMessage)
+    case fatalError(FatalErrorMessage)
 
     enum CodingKeys: String, CodingKey {
         case type
     }
 
     enum MessageType: String, Codable {
+        case sessionState = "session_state"
         case transcriptDelta = "transcript_delta"
         case transcriptCompleted = "transcript_completed"
         case overlayResult = "overlay_result"
         case recoverableError = "recoverable_error"
+        case fatalError = "fatal_error"
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         switch try container.decode(MessageType.self, forKey: .type) {
+        case .sessionState:
+            self = .sessionState(try SessionStateMessage(from: decoder))
         case .transcriptDelta:
             self = .transcriptDelta(try TranscriptDelta(from: decoder))
         case .transcriptCompleted:
@@ -345,12 +383,17 @@ public enum ServerMessage: Codable, Equatable, Sendable {
             self = .overlayResult(try OverlayResultMessage(from: decoder))
         case .recoverableError:
             self = .recoverableError(try RecoverableErrorMessage(from: decoder))
+        case .fatalError:
+            self = .fatalError(try FatalErrorMessage(from: decoder))
         }
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
+        case let .sessionState(message):
+            try container.encode(MessageType.sessionState, forKey: .type)
+            try message.encode(to: encoder)
         case let .transcriptDelta(message):
             try container.encode(MessageType.transcriptDelta, forKey: .type)
             try message.encode(to: encoder)
@@ -362,6 +405,9 @@ public enum ServerMessage: Codable, Equatable, Sendable {
             try message.encode(to: encoder)
         case let .recoverableError(message):
             try container.encode(MessageType.recoverableError, forKey: .type)
+            try message.encode(to: encoder)
+        case let .fatalError(message):
+            try container.encode(MessageType.fatalError, forKey: .type)
             try message.encode(to: encoder)
         }
     }

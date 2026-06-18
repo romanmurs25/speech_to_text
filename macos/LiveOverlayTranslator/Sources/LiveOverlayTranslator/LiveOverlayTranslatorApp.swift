@@ -7,51 +7,100 @@ struct LiveOverlayTranslatorApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
+        Window("LiveOverlayTranslator", id: "controls") {
+            ControlPanelView(controller: appDelegate.controller)
+        }
+
         Settings {
-            SettingsView()
+            ControlPanelView(controller: appDelegate.controller)
         }
     }
 }
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let overlayState = OverlayState()
-    private var overlayController: OverlayWindowController?
-    private var shortcutController: GlobalShortcutController?
-    private let cleanShareCoordinator = CleanShareCoordinator()
+    let controller = ApplicationController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let controller = OverlayWindowController(state: overlayState)
-        overlayController = controller
-        controller.show()
+        controller.applicationDidFinishLaunching()
+    }
 
-        shortcutController = GlobalShortcutController(
-            toggleOverlay: { [weak controller] in controller?.toggleVisibility() },
-            emergencyHide: { [weak self] in
-                self?.overlayController?.hide()
-                self?.cleanShareCoordinator.stop()
-            }
-        )
-        shortcutController?.install()
-
+    func applicationWillTerminate(_ notification: Notification) {
         Task {
-            let source = MockOverlayEventSource()
-            for await event in source.events() {
-                overlayState.apply(event)
-            }
+            await controller.shutdown()
         }
     }
 }
 
-struct SettingsView: View {
+struct ControlPanelView: View {
+    @ObservedObject var controller: ApplicationController
+
     var body: some View {
-        Form {
+        VStack(alignment: .leading, spacing: 16) {
             Text("LiveOverlayTranslator")
-            Text("Share the Clean Feed window, not the physical Entire Screen source.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                .font(.title3.weight(.semibold))
+
+            Picker("Mode", selection: $controller.mode) {
+                ForEach(ApplicationMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Backend WebSocket URL")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("ws://127.0.0.1:8787/ws", text: $controller.backendURLString)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(controller.mode == .localMock)
+            }
+
+            HStack {
+                Label("P0 source: Microphone", systemImage: "mic")
+                Spacer()
+                Text(controller.microphoneState.rawValue)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Button("Start Listening") {
+                    Task {
+                        await controller.startListening()
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(controller.runState == .connecting || controller.runState == .listening)
+
+                Button("Stop Listening") {
+                    Task {
+                        await controller.stopListening()
+                    }
+                }
+                .disabled(controller.runState == .idle)
+
+                Spacer()
+
+                Text(controller.runState.rawValue)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let error = controller.lastError {
+                Text(error)
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("System audio is unavailable in this P0 build.")
+                Text("Clean Share is not implemented; sharing Entire Screen can expose the overlay.")
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
         }
         .padding(20)
-        .frame(width: 420)
+        .frame(width: 460)
     }
 }

@@ -3,6 +3,7 @@ import {
   FinalUtteranceEnvelopeSchema,
   type ClientControlMessage,
   type FinalUtteranceEnvelope,
+  type Source,
   type ServerMessage
 } from "../protocol/schemas.js";
 import { RealtimeEventRouter } from "../openai/RealtimeEventRouter.js";
@@ -29,9 +30,9 @@ export class ClientSessionManager {
   private readonly dialogue = new DialogueContextService({ maxTurns: 10 });
   private readonly correlation = new UtteranceCorrelationStore();
   private readonly router = new RealtimeEventRouter(this.correlation);
-  private readonly realtimeClients = new Map<string, RealtimeTranscriptionClient>();
+  private readonly realtimeClients = new Map<Source, RealtimeTranscriptionClient>();
   private activeClientUtteranceId: string | null = null;
-  private activeSource: string | null = null;
+  private activeSource: Source | null = null;
 
   constructor(private readonly options: ClientSessionManagerOptions) {
     this.overlayResponses = new OverlayResponseService(options.overlayResponseClient);
@@ -49,12 +50,44 @@ export class ClientSessionManager {
         return;
 
       case "start_stream":
+        if (message.source !== "microphone") {
+          this.options.send({
+            type: "recoverable_error",
+            code: "source_unavailable",
+            message: "System audio capture is not available in the P0 microphone build."
+          });
+          return;
+        }
+
         if (!this.options.mockMode && this.options.realtimeClientFactory) {
           this.realtimeClients.set(message.source, this.options.realtimeClientFactory(message));
         }
         return;
 
       case "utterance_start":
+        if (message.source !== "microphone") {
+          this.options.send({
+            type: "recoverable_error",
+            code: "source_unavailable",
+            message: "System audio capture is not available in the P0 microphone build.",
+            client_utterance_id: message.client_utterance_id
+          });
+          return;
+        }
+
+        if (
+          this.activeClientUtteranceId &&
+          this.activeClientUtteranceId !== message.client_utterance_id
+        ) {
+          this.options.send({
+            type: "recoverable_error",
+            code: "overlapping_utterance_rejected",
+            message: "Only one microphone utterance can be active at a time.",
+            client_utterance_id: message.client_utterance_id
+          });
+          return;
+        }
+
         this.activeClientUtteranceId = message.client_utterance_id;
         this.activeSource = message.source;
         this.correlation.enqueue({
@@ -67,17 +100,39 @@ export class ClientSessionManager {
         return;
 
       case "utterance_commit":
-        this.correlation.markEnded(message.client_utterance_id, message.ended_at_ms);
+        if (
+          this.activeClientUtteranceId &&
+          this.activeClientUtteranceId !== message.client_utterance_id
+        ) {
+          this.options.send({
+            type: "recoverable_error",
+            code: "utterance_not_active",
+            message: "The committed utterance is not the active microphone utterance.",
+            client_utterance_id: message.client_utterance_id
+          });
+          return;
+        }
+
+        const utterance = this.correlation.markEnded(message.client_utterance_id, message.ended_at_ms);
+        if (!utterance) {
+          this.options.send({
+            type: "recoverable_error",
+            code: "unknown_utterance",
+            message: "The committed utterance was not accepted.",
+            client_utterance_id: message.client_utterance_id
+          });
+          return;
+        }
+
         if (this.options.mockMode) {
           await this.emitMockCompletion(message.client_utterance_id, message.sequence, message.ended_at_ms);
         } else {
-          const source = this.correlation.getByClientUtteranceId(message.client_utterance_id)?.source;
-          if (source) {
-            this.realtimeClients.get(source)?.commit();
-          }
+          this.realtimeClients.get(utterance.source)?.commit();
         }
-        this.activeClientUtteranceId = null;
-        this.activeSource = null;
+        if (this.activeClientUtteranceId === message.client_utterance_id) {
+          this.activeClientUtteranceId = null;
+          this.activeSource = null;
+        }
         return;
 
       case "stop_stream":
@@ -111,7 +166,7 @@ export class ClientSessionManager {
     }
   }
 
-  handleRealtimeDisconnect(source?: string): void {
+  handleRealtimeDisconnect(source?: Source): void {
     if (source) {
       this.realtimeClients.delete(source);
     } else {
@@ -188,14 +243,14 @@ export class ClientSessionManager {
       context: this.dialogue.context(),
       reply_style: "concise_professional"
     } satisfies FinalUtteranceEnvelope);
+    this.dialogue.addSpeechTurn({
+      speaker: envelope.speaker,
+      text: envelope.source_text,
+      sequence: envelope.sequence
+    });
 
     try {
       const result = await this.overlayResponses.translate(envelope);
-      this.dialogue.addSpeechTurn({
-        speaker: envelope.speaker,
-        text: envelope.source_text,
-        sequence: envelope.sequence
-      });
       if (result.reply_needed) {
         this.dialogue.addSuggestedReply({
           suggestedReplyRu: result.suggested_reply_ru,
