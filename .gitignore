@@ -1,0 +1,10 @@
+.DS_Store
+.env
+node_modules/
+dist/
+.build/
+DerivedData/
+*.xcuserstate
+*.xcuserdata/
+*.swp
+coverage/

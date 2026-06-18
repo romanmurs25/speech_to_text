@@ -1,0 +1,246 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		10A000000000000000000001 /* LiveOverlayTranslatorApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10B000000000000000000001 /* LiveOverlayTranslatorApp.swift */; };
+		10A000000000000000000002 /* OverlayWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10B000000000000000000002 /* OverlayWindowController.swift */; };
+		10A000000000000000000003 /* MicrophoneAudioCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10B000000000000000000003 /* MicrophoneAudioCaptureService.swift */; };
+		10A000000000000000000004 /* SystemAudioCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10B000000000000000000004 /* SystemAudioCaptureService.swift */; };
+		10A000000000000000000005 /* CleanShareCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10B000000000000000000005 /* CleanShareCoordinator.swift */; };
+		10A000000000000000000006 /* GlobalShortcutController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10B000000000000000000006 /* GlobalShortcutController.swift */; };
+		10A000000000000000000007 /* LiveOverlayTranslatorCore in Frameworks */ = {isa = PBXBuildFile; productRef = 10D000000000000000000002 /* LiveOverlayTranslatorCore */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		10B000000000000000000001 /* LiveOverlayTranslatorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveOverlayTranslatorApp.swift; sourceTree = "<group>"; };
+		10B000000000000000000002 /* OverlayWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverlayWindowController.swift; sourceTree = "<group>"; };
+		10B000000000000000000003 /* MicrophoneAudioCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicrophoneAudioCaptureService.swift; sourceTree = "<group>"; };
+		10B000000000000000000004 /* SystemAudioCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemAudioCaptureService.swift; sourceTree = "<group>"; };
+		10B000000000000000000005 /* CleanShareCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CleanShareCoordinator.swift; sourceTree = "<group>"; };
+		10B000000000000000000006 /* GlobalShortcutController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalShortcutController.swift; sourceTree = "<group>"; };
+		10B000000000000000000007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = SOURCE_ROOT; };
+		10B000000000000000000008 /* LiveOverlayTranslator.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LiveOverlayTranslator.entitlements; sourceTree = SOURCE_ROOT; };
+		10B000000000000000000009 /* LiveOverlayTranslator.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LiveOverlayTranslator.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		10C000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				10A000000000000000000007 /* LiveOverlayTranslatorCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		10E000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				10E000000000000000000002 /* Sources */,
+				10B000000000000000000007 /* Info.plist */,
+				10B000000000000000000008 /* LiveOverlayTranslator.entitlements */,
+				10E000000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		10E000000000000000000002 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				10B000000000000000000001 /* LiveOverlayTranslatorApp.swift */,
+				10B000000000000000000002 /* OverlayWindowController.swift */,
+				10B000000000000000000003 /* MicrophoneAudioCaptureService.swift */,
+				10B000000000000000000004 /* SystemAudioCaptureService.swift */,
+				10B000000000000000000005 /* CleanShareCoordinator.swift */,
+				10B000000000000000000006 /* GlobalShortcutController.swift */,
+			);
+			path = Sources/LiveOverlayTranslator;
+			sourceTree = SOURCE_ROOT;
+		};
+		10E000000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				10B000000000000000000009 /* LiveOverlayTranslator.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		10F000000000000000000001 /* LiveOverlayTranslator */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 10F000000000000000000004 /* Build configuration list for PBXNativeTarget "LiveOverlayTranslator" */;
+			buildPhases = (
+				10F000000000000000000002 /* Sources */,
+				10C000000000000000000001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = LiveOverlayTranslator;
+			packageProductDependencies = (
+				10D000000000000000000002 /* LiveOverlayTranslatorCore */,
+			);
+			productName = LiveOverlayTranslator;
+			productReference = 10B000000000000000000009 /* LiveOverlayTranslator.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		10F000000000000000000003 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					10F000000000000000000001 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = 10F000000000000000000005 /* Build configuration list for PBXProject "LiveOverlayTranslator" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 10E000000000000000000001;
+			packageReferences = (
+				10D000000000000000000001 /* XCLocalSwiftPackageReference "." */,
+			);
+			productRefGroup = 10E000000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				10F000000000000000000001 /* LiveOverlayTranslator */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		10F000000000000000000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				10A000000000000000000001 /* LiveOverlayTranslatorApp.swift in Sources */,
+				10A000000000000000000002 /* OverlayWindowController.swift in Sources */,
+				10A000000000000000000003 /* MicrophoneAudioCaptureService.swift in Sources */,
+				10A000000000000000000004 /* SystemAudioCaptureService.swift in Sources */,
+				10A000000000000000000005 /* CleanShareCoordinator.swift in Sources */,
+				10A000000000000000000006 /* GlobalShortcutController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		10F000000000000000000006 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = LiveOverlayTranslator.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.LiveOverlayTranslator;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		10F000000000000000000007 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = LiveOverlayTranslator.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.LiveOverlayTranslator;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		10F000000000000000000008 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		10F000000000000000000009 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		10F000000000000000000004 /* Build configuration list for PBXNativeTarget "LiveOverlayTranslator" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				10F000000000000000000006 /* Debug */,
+				10F000000000000000000007 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		10F000000000000000000005 /* Build configuration list for PBXProject "LiveOverlayTranslator" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				10F000000000000000000008 /* Debug */,
+				10F000000000000000000009 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		10D000000000000000000001 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ".";
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		10D000000000000000000002 /* LiveOverlayTranslatorCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 10D000000000000000000001 /* XCLocalSwiftPackageReference "." */;
+			productName = LiveOverlayTranslatorCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 10F000000000000000000003 /* Project object */;
+}
