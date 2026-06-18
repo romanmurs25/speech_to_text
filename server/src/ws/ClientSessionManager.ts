@@ -8,6 +8,7 @@ import {
 } from "../protocol/schemas.js";
 import { RealtimeEventRouter } from "../openai/RealtimeEventRouter.js";
 import type { RealtimeTranscriptionClient } from "../openai/OpenAIRealtimeTranscriptionClient.js";
+import type { RealtimeTerminalFailure } from "../openai/OpenAIRealtimeTranscriptionClient.js";
 import type { OverlayResponseClient } from "../services/OverlayResponseService.js";
 import {
   OverlayResponseService,
@@ -22,6 +23,7 @@ export interface ClientSessionManagerOptions {
   overlayResponseClient: OverlayResponseClient;
   send: (message: ServerMessage) => void;
   realtimeClientFactory?: (source: ClientControlMessage & { type: "start_stream" }) => RealtimeTranscriptionClient;
+  terminate?: () => void;
 }
 
 export class ClientSessionManager {
@@ -33,12 +35,18 @@ export class ClientSessionManager {
   private readonly realtimeClients = new Map<Source, RealtimeTranscriptionClient>();
   private activeClientUtteranceId: string | null = null;
   private activeSource: Source | null = null;
+  private terminated = false;
+  private readonly failedRealtimeSources = new Set<Source>();
 
   constructor(private readonly options: ClientSessionManagerOptions) {
     this.overlayResponses = new OverlayResponseService(options.overlayResponseClient);
   }
 
   async handleControl(message: ClientControlMessage): Promise<void> {
+    if (this.terminated) {
+      return;
+    }
+
     switch (message.type) {
       case "hello":
         this.sessionId = message.session_id;
@@ -60,6 +68,7 @@ export class ClientSessionManager {
         }
 
         if (!this.options.mockMode && this.options.realtimeClientFactory) {
+          this.failedRealtimeSources.delete(message.source);
           this.realtimeClients.set(message.source, this.options.realtimeClientFactory(message));
         }
         return;
@@ -75,28 +84,28 @@ export class ClientSessionManager {
           return;
         }
 
-        if (
-          this.activeClientUtteranceId &&
-          this.activeClientUtteranceId !== message.client_utterance_id
-        ) {
-          this.options.send({
-            type: "recoverable_error",
-            code: "overlapping_utterance_rejected",
-            message: "Only one microphone utterance can be active at a time.",
-            client_utterance_id: message.client_utterance_id
-          });
+        if (this.activeClientUtteranceId && this.activeClientUtteranceId !== message.client_utterance_id) {
+          this.failAmbiguousAudioRouting();
           return;
         }
 
-        this.activeClientUtteranceId = message.client_utterance_id;
-        this.activeSource = message.source;
-        this.correlation.enqueue({
+        const enqueueResult = this.correlation.enqueue({
           clientUtteranceId: message.client_utterance_id,
           sequence: message.sequence,
           source: message.source,
           speaker: message.speaker,
           startedAtMs: message.started_at_ms
         });
+        if (enqueueResult === "duplicate") {
+          return;
+        }
+        if (enqueueResult === "conflict") {
+          this.sendFatalAndTerminate("protocol_violation", "Conflicting duplicate utterance_start.");
+          return;
+        }
+
+        this.activeClientUtteranceId = message.client_utterance_id;
+        this.activeSource = message.source;
         return;
 
       case "utterance_commit":
@@ -113,21 +122,25 @@ export class ClientSessionManager {
           return;
         }
 
-        const utterance = this.correlation.markEnded(message.client_utterance_id, message.ended_at_ms);
-        if (!utterance) {
+        const commit = this.correlation.requestCommit(message.client_utterance_id, message.ended_at_ms);
+        if (!commit.ok) {
           this.options.send({
             type: "recoverable_error",
-            code: "unknown_utterance",
-            message: "The committed utterance was not accepted.",
+            code: commit.code === "not_found" ? "unknown_utterance" : "utterance_not_committable",
+            message: "The utterance is not active and cannot be committed.",
             client_utterance_id: message.client_utterance_id
           });
+          return;
+        }
+
+        if (commit.duplicate) {
           return;
         }
 
         if (this.options.mockMode) {
           await this.emitMockCompletion(message.client_utterance_id, message.sequence, message.ended_at_ms);
         } else {
-          this.realtimeClients.get(utterance.source)?.commit();
+          this.realtimeClients.get(commit.utterance.source)?.commit();
         }
         if (this.activeClientUtteranceId === message.client_utterance_id) {
           this.activeClientUtteranceId = null;
@@ -135,7 +148,50 @@ export class ClientSessionManager {
         }
         return;
 
+      case "utterance_cancel": {
+        if (
+          this.activeClientUtteranceId &&
+          this.activeClientUtteranceId !== message.client_utterance_id
+        ) {
+          this.sendFatalAndTerminate("protocol_violation", "Cancel referenced a different active utterance.");
+          return;
+        }
+
+        const cancel = this.correlation.cancel(
+          message.client_utterance_id,
+          message.reason,
+          message.sequence
+        );
+        if (!cancel.ok) {
+          if (cancel.code === "not_found") {
+            return;
+          }
+          this.options.send({
+            type: "recoverable_error",
+            code: "utterance_not_cancellable",
+            message: "The utterance could not be cancelled safely.",
+            client_utterance_id: message.client_utterance_id
+          });
+          return;
+        }
+
+        if (!cancel.duplicate && !this.options.mockMode) {
+          this.realtimeClients.get(cancel.utterance.source)?.clear();
+        }
+        if (this.activeClientUtteranceId === message.client_utterance_id) {
+          this.activeClientUtteranceId = null;
+          this.activeSource = null;
+        }
+        return;
+      }
+
       case "stop_stream":
+        this.correlation.clearUncommittedForSource(message.source, "user_interrupted");
+        if (this.activeSource === message.source) {
+          this.activeClientUtteranceId = null;
+          this.activeSource = null;
+        }
+        this.realtimeClients.get(message.source)?.clear();
         this.realtimeClients.get(message.source)?.close();
         this.realtimeClients.delete(message.source);
         return;
@@ -143,7 +199,7 @@ export class ClientSessionManager {
   }
 
   handleAudio(data: RawData | Buffer): void {
-    if (this.options.mockMode || !this.activeClientUtteranceId) {
+    if (this.terminated || this.options.mockMode || !this.activeClientUtteranceId) {
       return;
     }
 
@@ -167,25 +223,69 @@ export class ClientSessionManager {
   }
 
   handleRealtimeDisconnect(source?: Source): void {
-    if (source) {
-      this.realtimeClients.delete(source);
-    } else {
-      this.realtimeClients.clear();
+    this.handleRealtimeFailure(source ?? "microphone", {
+      source: source ?? "microphone",
+      code: "openai_realtime_disconnected",
+      message: "Transcription disconnected. The interrupted utterance was not committed or replayed.",
+      interruptedUtterance: true
+    });
+  }
+
+  handleRealtimeFailure(source: Source, failure: RealtimeTerminalFailure): void {
+    const hadClient = this.realtimeClients.delete(source);
+    const interruptedUtterance =
+      this.activeSource === source ? this.activeClientUtteranceId ?? undefined : undefined;
+    const cancelled = this.correlation.clearUncommittedForSource(source, "capture_interrupted");
+    if (!hadClient && !interruptedUtterance && cancelled.length === 0) {
+      if (this.failedRealtimeSources.has(source)) {
+        return;
+      }
     }
-    this.activeClientUtteranceId = null;
-    this.activeSource = null;
+    this.failedRealtimeSources.add(source);
+
+    if (this.activeSource === source) {
+      this.activeClientUtteranceId = null;
+      this.activeSource = null;
+    }
     this.options.send({
       type: "recoverable_error",
-      code: "openai_realtime_disconnected",
-      message: "Transcription disconnected. The interrupted utterance was not replayed automatically."
+      code: failure.code,
+      message: failure.message,
+      client_utterance_id: interruptedUtterance
     });
   }
 
   close(): void {
-    for (const client of this.realtimeClients.values()) {
+    for (const [source, client] of this.realtimeClients) {
+      this.correlation.clearUncommittedForSource(source, "application_shutdown");
+      client.clear();
       client.close();
     }
     this.realtimeClients.clear();
+    this.activeClientUtteranceId = null;
+    this.activeSource = null;
+  }
+
+  private failAmbiguousAudioRouting(): void {
+    if (this.activeSource) {
+      this.realtimeClients.get(this.activeSource)?.clear();
+      this.correlation.clearUncommittedForSource(this.activeSource, "capture_interrupted");
+    }
+    this.activeClientUtteranceId = null;
+    this.activeSource = null;
+    this.sendFatalAndTerminate(
+      "ambiguous_audio_routing",
+      "The audio stream entered an ambiguous utterance state."
+    );
+  }
+
+  private sendFatalAndTerminate(code: string, message: string): void {
+    if (this.terminated) {
+      return;
+    }
+    this.terminated = true;
+    this.options.send({ type: "fatal_error", code, message });
+    this.options.terminate?.();
   }
 
   private async emitMockCompletion(

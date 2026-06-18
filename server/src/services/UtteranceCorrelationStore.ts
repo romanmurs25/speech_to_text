@@ -1,4 +1,11 @@
-import type { Source, Speaker } from "../protocol/schemas.js";
+import type { Source, Speaker, UtteranceCancelReason } from "../protocol/schemas.js";
+
+export type UtteranceLifecycle =
+  | "active"
+  | "commitRequested"
+  | "correlated"
+  | "completed"
+  | "cancelled";
 
 export interface PendingUtterance {
   clientUtteranceId: string;
@@ -15,57 +22,220 @@ export interface CorrelatedUtterance extends PendingUtterance {
   completed: boolean;
 }
 
-export class UtteranceCorrelationStore {
-  private readonly pending: PendingUtterance[] = [];
-  private readonly byItemId = new Map<string, CorrelatedUtterance>();
-  private readonly byClientUtteranceId = new Map<string, PendingUtterance>();
+interface UtteranceRecord extends PendingUtterance {
+  lifecycle: UtteranceLifecycle;
+  openAIItemId?: string;
+  transcript?: string;
+  cancelReason?: UtteranceCancelReason;
+}
 
-  enqueue(utterance: PendingUtterance): void {
-    this.pending.push(utterance);
-    this.byClientUtteranceId.set(utterance.clientUtteranceId, utterance);
+export type EnqueueResult = "enqueued" | "duplicate" | "conflict";
+export type CommitRequestResult =
+  | { ok: true; utterance: PendingUtterance; duplicate: boolean }
+  | { ok: false; code: "not_found" | "cancelled" | "already_committed" | "conflict" };
+export type CancelResult =
+  | { ok: true; utterance: PendingUtterance; duplicate: boolean }
+  | { ok: false; code: "not_found" | "already_committed" | "conflict" };
+
+export class UtteranceCorrelationStore {
+  private readonly records = new Map<string, UtteranceRecord>();
+  private readonly byItemId = new Map<string, UtteranceRecord>();
+  private readonly commitQueue: string[] = [];
+  private readonly finishedOrder: string[] = [];
+  private readonly maxFinishedRecords: number;
+
+  constructor(options: { maxFinishedRecords?: number } = {}) {
+    this.maxFinishedRecords = options.maxFinishedRecords ?? 512;
   }
 
-  markEnded(clientUtteranceId: string, endedAtMs: number): PendingUtterance | null {
-    const utterance = this.byClientUtteranceId.get(clientUtteranceId);
-    if (!utterance) {
-      return null;
+  enqueue(utterance: PendingUtterance): EnqueueResult {
+    const existing = this.records.get(utterance.clientUtteranceId);
+    if (existing) {
+      return sameUtteranceMetadata(existing, utterance) ? "duplicate" : "conflict";
     }
 
-    utterance.endedAtMs = endedAtMs;
-    return utterance;
+    this.records.set(utterance.clientUtteranceId, {
+      ...utterance,
+      lifecycle: "active"
+    });
+    return "enqueued";
+  }
+
+  requestCommit(clientUtteranceId: string, endedAtMs: number): CommitRequestResult {
+    const record = this.records.get(clientUtteranceId);
+    if (!record) {
+      return { ok: false, code: "not_found" };
+    }
+
+    if (record.lifecycle === "cancelled") {
+      return { ok: false, code: "cancelled" };
+    }
+
+    if (record.lifecycle === "commitRequested") {
+      record.endedAtMs = endedAtMs;
+      return { ok: true, utterance: asPending(record), duplicate: true };
+    }
+
+    if (record.lifecycle === "correlated" || record.lifecycle === "completed") {
+      return { ok: false, code: "already_committed" };
+    }
+
+    if (record.lifecycle !== "active") {
+      return { ok: false, code: "conflict" };
+    }
+
+    record.lifecycle = "commitRequested";
+    record.endedAtMs = endedAtMs;
+    this.commitQueue.push(clientUtteranceId);
+    return { ok: true, utterance: asPending(record), duplicate: false };
+  }
+
+  cancel(
+    clientUtteranceId: string,
+    reason: UtteranceCancelReason,
+    expectedSequence?: number
+  ): CancelResult {
+    const record = this.records.get(clientUtteranceId);
+    if (!record) {
+      return { ok: false, code: "not_found" };
+    }
+
+    if (expectedSequence !== undefined && record.sequence !== expectedSequence) {
+      return { ok: false, code: "conflict" };
+    }
+
+    if (record.lifecycle === "cancelled") {
+      return { ok: true, utterance: asPending(record), duplicate: true };
+    }
+
+    if (
+      record.lifecycle === "commitRequested" ||
+      record.lifecycle === "correlated" ||
+      record.lifecycle === "completed"
+    ) {
+      return { ok: false, code: "already_committed" };
+    }
+
+    record.lifecycle = "cancelled";
+    record.cancelReason = reason;
+    this.removeFromCommitQueue(clientUtteranceId);
+    this.rememberFinished(clientUtteranceId);
+    return { ok: true, utterance: asPending(record), duplicate: false };
   }
 
   markCommitted(openAIItemId: string): CorrelatedUtterance | null {
-    const next = this.pending.shift();
-    if (!next) {
-      return null;
+    while (this.commitQueue.length > 0) {
+      const clientUtteranceId = this.commitQueue.shift();
+      if (!clientUtteranceId) {
+        continue;
+      }
+
+      const record = this.records.get(clientUtteranceId);
+      if (!record || record.lifecycle !== "commitRequested") {
+        continue;
+      }
+
+      record.lifecycle = "correlated";
+      record.openAIItemId = openAIItemId;
+      this.byItemId.set(openAIItemId, record);
+      return asCorrelated(record);
     }
 
-    const correlated: CorrelatedUtterance = {
-      ...next,
-      openAIItemId,
-      completed: false
-    };
-    this.byItemId.set(openAIItemId, correlated);
-    return correlated;
+    return null;
   }
 
   getByOpenAIItemId(openAIItemId: string): CorrelatedUtterance | undefined {
-    return this.byItemId.get(openAIItemId);
+    const record = this.byItemId.get(openAIItemId);
+    if (!record || record.lifecycle === "cancelled") {
+      return undefined;
+    }
+    return asCorrelated(record);
   }
 
   getByClientUtteranceId(clientUtteranceId: string): PendingUtterance | undefined {
-    return this.byClientUtteranceId.get(clientUtteranceId);
+    const record = this.records.get(clientUtteranceId);
+    return record ? asPending(record) : undefined;
   }
 
   complete(openAIItemId: string, transcript: string): CorrelatedUtterance | null {
-    const utterance = this.byItemId.get(openAIItemId);
-    if (!utterance || utterance.completed) {
+    const record = this.byItemId.get(openAIItemId);
+    if (!record || record.lifecycle !== "correlated") {
       return null;
     }
 
-    utterance.completed = true;
-    utterance.transcript = transcript;
-    return utterance;
+    record.lifecycle = "completed";
+    record.transcript = transcript;
+    this.rememberFinished(record.clientUtteranceId);
+    return asCorrelated(record);
   }
+
+  clearUncommittedForSource(source: Source, reason: UtteranceCancelReason): PendingUtterance[] {
+    const cancelled: PendingUtterance[] = [];
+    for (const record of this.records.values()) {
+      if (
+        record.source === source &&
+        (record.lifecycle === "active" || record.lifecycle === "commitRequested")
+      ) {
+        record.lifecycle = "cancelled";
+        record.cancelReason = reason;
+        this.removeFromCommitQueue(record.clientUtteranceId);
+        this.rememberFinished(record.clientUtteranceId);
+        cancelled.push(asPending(record));
+      }
+    }
+    return cancelled;
+  }
+
+  private removeFromCommitQueue(clientUtteranceId: string): void {
+    for (let index = this.commitQueue.length - 1; index >= 0; index -= 1) {
+      if (this.commitQueue[index] === clientUtteranceId) {
+        this.commitQueue.splice(index, 1);
+      }
+    }
+  }
+
+  private rememberFinished(clientUtteranceId: string): void {
+    this.finishedOrder.push(clientUtteranceId);
+    while (this.finishedOrder.length > this.maxFinishedRecords) {
+      const expired = this.finishedOrder.shift();
+      if (!expired) {
+        continue;
+      }
+      const record = this.records.get(expired);
+      if (record?.openAIItemId) {
+        this.byItemId.delete(record.openAIItemId);
+      }
+      this.records.delete(expired);
+    }
+  }
+}
+
+function sameUtteranceMetadata(a: PendingUtterance, b: PendingUtterance): boolean {
+  return (
+    a.clientUtteranceId === b.clientUtteranceId &&
+    a.sequence === b.sequence &&
+    a.source === b.source &&
+    a.speaker === b.speaker &&
+    a.startedAtMs === b.startedAtMs
+  );
+}
+
+function asPending(record: UtteranceRecord): PendingUtterance {
+  return {
+    clientUtteranceId: record.clientUtteranceId,
+    sequence: record.sequence,
+    source: record.source,
+    speaker: record.speaker,
+    startedAtMs: record.startedAtMs,
+    endedAtMs: record.endedAtMs
+  };
+}
+
+function asCorrelated(record: UtteranceRecord): CorrelatedUtterance {
+  return {
+    ...asPending(record),
+    openAIItemId: record.openAIItemId ?? "",
+    transcript: record.transcript,
+    completed: record.lifecycle === "completed"
+  };
 }

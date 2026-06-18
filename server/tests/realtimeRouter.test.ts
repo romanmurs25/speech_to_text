@@ -12,6 +12,7 @@ describe("RealtimeEventRouter", () => {
       speaker: "remote",
       startedAtMs: 100
     });
+    store.requestCommit("client-a", 4, 150);
     store.markCommitted("item-a");
 
     const router = new RealtimeEventRouter(store);
@@ -66,6 +67,7 @@ describe("RealtimeEventRouter", () => {
       speaker: "remote",
       startedAtMs: 100
     });
+    store.requestCommit("client-a", 4, 150);
     store.markCommitted("item-a");
     const router = new RealtimeEventRouter(store);
 

@@ -12,6 +12,9 @@ export type OpenAIRealtimeEvent =
       item?: { id?: string };
     }
   | {
+      type: "input_audio_buffer.cleared";
+    }
+  | {
       type: "conversation.item.input_audio_transcription.delta";
       item_id?: string;
       item_id_old?: string;
@@ -36,6 +39,10 @@ export class RealtimeEventRouter {
       if (itemId) {
         this.correlationStore.markCommitted(itemId);
       }
+      return null;
+    }
+
+    if (event.type === "input_audio_buffer.cleared") {
       return null;
     }
 

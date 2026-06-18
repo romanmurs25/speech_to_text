@@ -97,3 +97,28 @@ func energyDetectorEndsContinuousSpeechAtMaximumDuration() {
         return false
     })
 }
+
+@Test
+func energyDetectorPreservesBoundedPreRollForSecondUtterance() {
+    var settings = SpeechEndpointSettings()
+    settings.sampleRate = 1_000
+    settings.preRollMs = 100
+    settings.speechStartConfirmationMs = 50
+    settings.phraseEndingSilenceMs = 100
+    settings.minimumNonSilentUtteranceMs = 50
+    settings.initialNoiseFloor = 20
+    settings.speechEnergyMultiplier = 3
+    let detector = EnergySpeechEndpointDetector(settings: settings)
+
+    _ = detector.process(samples: Array(repeating: 0, count: 100), timestampMs: 0)
+    _ = detector.process(samples: Array(repeating: 1_000, count: 50), timestampMs: 100)
+    _ = detector.process(samples: Array(repeating: 0, count: 100), timestampMs: 150)
+    let secondStart = detector.process(samples: Array(repeating: 1_000, count: 50), timestampMs: 250)
+
+    guard case let .speechStarted(startedAtMs, initialSamples) = secondStart.first else {
+        Issue.record("Expected second speech start")
+        return
+    }
+    #expect(startedAtMs == 150)
+    #expect(initialSamples.count == 150)
+}

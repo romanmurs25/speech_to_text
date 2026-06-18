@@ -19,10 +19,11 @@ The backend is the only component that owns `OPENAI_API_KEY`. The macOS app talk
    - `utterance_start`
    - binary PCM audio frames
    - `utterance_commit`
+   - `utterance_cancel` for discarded or interrupted uncommitted utterances
 6. The backend validates JSON control messages with Zod in `ClientProtocolValidator`.
 7. `ClientSessionManager` owns one active microphone Realtime transcription client for the P0 stream.
-8. The backend forwards PCM chunks to OpenAI Realtime using `input_audio_buffer.append`, then commits local endpointed phrases using `input_audio_buffer.commit`.
-9. `UtteranceCorrelationStore` maps pending client utterance IDs to OpenAI item IDs when OpenAI acknowledges committed audio.
+8. The backend forwards PCM chunks to OpenAI Realtime using `input_audio_buffer.append`, clears discarded audio using `input_audio_buffer.clear`, then commits local endpointed phrases using `input_audio_buffer.commit`.
+9. `UtteranceCorrelationStore` tracks each utterance through `active`, `commitRequested`, `correlated`, `completed`, or `cancelled` states and maps committed client utterance IDs to OpenAI item IDs when OpenAI acknowledges committed audio.
 10. `RealtimeEventRouter` emits provisional `transcript_delta` messages as subdued overlay text.
 11. Only `conversation.item.input_audio_transcription.completed` creates a final utterance envelope.
 12. `DialogueContextService` selects the latest 8 to 12 verified real speech turns. AI suggested replies are excluded unless the user marks them used or later local microphone transcription confirms the user spoke them.
@@ -40,6 +41,7 @@ The backend is the only component that owns `OPENAI_API_KEY`. The macOS app talk
 - `SpeechEndpointDetector`: replaceable local speech boundary detector.
 - `EnergySpeechEndpointDetector`: initial detector with settings-driven thresholds and pre-roll.
 - `AudioStreamCoordinator`: bridges capture, endpoint detection, protocol messages, and retry state.
+- `BoundedAudioChunkPipe`: bounded capture-to-processing pipe; overflow cancels the active utterance and stops the session.
 - `BackendWebSocketClient`: Codable WebSocket client for JSON control messages and binary frames.
 - `TranscriptAssembler`: merges streaming deltas and final replacements per utterance.
 - `DialogueStore`: stores only verified finalized real speech turns.
@@ -52,7 +54,7 @@ The backend is the only component that owns `OPENAI_API_KEY`. The macOS app talk
 
 - `ClientSessionManager`: owns session lifecycle, source stream state, message limits, and reconnect-safe interruption behavior.
 - `ClientProtocolValidator`: Zod validation for all JSON client messages.
-- `OpenAIRealtimeTranscriptionClient`: interface for OpenAI Realtime WebSocket sessions.
+- `OpenAIRealtimeTranscriptionClient`: interface for OpenAI Realtime WebSocket sessions, including bounded readiness queues, `clear`, and terminal failure callbacks.
 - `RealtimeEventRouter`: converts OpenAI Realtime events into application protocol events.
 - `UtteranceCorrelationStore`: correlates client utterance IDs, sequence numbers, and OpenAI item IDs without relying on event order.
 - `DialogueContextService`: creates verified dialogue context windows.
@@ -70,6 +72,7 @@ JSON control messages and binary PCM audio frames share one connection. Producti
 - The app performs local endpoint detection, so server-side Realtime turn detection is omitted or explicitly set to null.
 - The P0 app exposes one microphone Realtime transcription session. Simultaneous microphone/system-audio multiplexing needs a future protocol change because binary audio frames currently have no stream identifier.
 - Audio chunks are appended as base64 PCM16. Local utterance boundaries trigger `input_audio_buffer.commit`.
+- Discarded or interrupted uncommitted utterances trigger `input_audio_buffer.clear`, not a commit.
 - Completion reconciliation uses OpenAI `item_id`, not arrival order.
 - Translation and reply generation use the Responses API with Structured Outputs, `store: false`, `reasoning.effort: none`, and an overrideable text model defaulting to `gpt-5.4-mini`.
 
@@ -94,6 +97,9 @@ The app and backend model these cases explicitly:
 - audio device changes;
 - WebSocket disconnect or backend restart;
 - OpenAI disconnect;
+- Realtime readiness queue overflow;
+- ambiguous audio routing;
+- active utterance cancellation;
 - malformed client or OpenAI events;
 - rate limits;
 - empty transcripts;
@@ -102,7 +108,7 @@ The app and backend model these cases explicitly:
 - Responses API timeout, refusal, or invalid structured output;
 - application sleep and wake.
 
-Reconnect uses bounded backoff with jitter. The app does not automatically replay committed audio after uncertain disconnects because replay can create duplicate transcriptions. The affected utterance is marked interrupted and can expose a safe retry path for text-only work.
+Reconnect uses bounded backoff with jitter. The app does not automatically replay committed or uncertain audio after disconnects because replay can create duplicate transcriptions. The affected uncommitted utterance is cancelled or marked interrupted and can expose a safe retry path for text-only work.
 
 ## Implementation Phases
 
@@ -112,4 +118,4 @@ Reconnect uses bounded backoff with jitter. The app does not automatically repla
 4. System audio capture, independent local and remote streams, timestamp ordering.
 5. Clean Share capture, self-window exclusion, emergency hide shortcut, diagnostics, and permission UX.
 
-This repository implements a P0 microphone vertical slice across phases 1, 2, and selected phase 3: backend mock mode and protocol tests, real Responses client boundary, Swift overlay state and NSPanel shell, endpoint detector tests, microphone capture, bounded PCM streaming, Realtime client readiness handling, and explicit unavailable states for system audio and Clean Share.
+This repository implements a P0 microphone vertical slice across phases 1, 2, and selected phase 3: backend mock mode and protocol tests, real Responses client boundary, Swift overlay state and NSPanel shell, endpoint detector tests, microphone capture, bounded PCM streaming, Realtime client readiness handling, cancellation/clear semantics for interrupted utterances, and explicit unavailable states for system audio and Clean Share.

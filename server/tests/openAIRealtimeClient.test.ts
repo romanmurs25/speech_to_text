@@ -42,6 +42,38 @@ describe("OpenAIRealtimeTranscriptionClient", () => {
     expect(errors).toEqual([]);
   });
 
+  it("queues append, clear, append, and commit in exact order before readiness", () => {
+    const socket = new FakeRealtimeSocket();
+    const errors: string[] = [];
+    const client = new OpenAIRealtimeTranscriptionClient({
+      apiKey: "test-key",
+      model: "gpt-realtime-whisper",
+      delay: "low",
+      source: "microphone",
+      languageHint: null,
+      socketFactory: () => socket,
+      onEvent: () => {},
+      onError: (error) => errors.push(error.message),
+      onDisconnect: () => {}
+    });
+
+    client.appendAudio(Buffer.from([1]));
+    client.clear();
+    client.appendAudio(Buffer.from([2]));
+    client.commit();
+    socket.open();
+    socket.message({ type: "session.updated" });
+
+    expect(socket.sent.map((value) => value.type)).toEqual([
+      "session.update",
+      "input_audio_buffer.append",
+      "input_audio_buffer.clear",
+      "input_audio_buffer.append",
+      "input_audio_buffer.commit"
+    ]);
+    expect(errors).toEqual([]);
+  });
+
   it("surfaces readiness queue overflow instead of silently dropping audio", () => {
     const socket = new FakeRealtimeSocket();
     const errors: string[] = [];
@@ -64,7 +96,38 @@ describe("OpenAIRealtimeTranscriptionClient", () => {
     socket.message({ type: "session.updated" });
 
     expect(errors).toEqual(["Realtime readiness queue overflow."]);
-    expect(socket.sent.map((value) => value.type)).toEqual(["session.update"]);
+    expect(socket.closed).toBe(true);
+    expect(socket.sent).toEqual([]);
+  });
+
+  it("treats readiness queue overflow as terminal and ignores late session.updated", () => {
+    const socket = new FakeRealtimeSocket();
+    const terminalFailures: string[] = [];
+    const events: unknown[] = [];
+    const client = new OpenAIRealtimeTranscriptionClient({
+      apiKey: "test-key",
+      model: "gpt-realtime-whisper",
+      delay: "low",
+      source: "microphone",
+      languageHint: null,
+      socketFactory: () => socket,
+      maxQueuedEvents: 1,
+      onEvent: (event) => events.push(event),
+      onError: () => {},
+      onDisconnect: () => terminalFailures.push("disconnect"),
+      onTerminalFailure: (failure) => terminalFailures.push(failure.code)
+    });
+
+    client.appendAudio(Buffer.from([1]));
+    client.commit();
+    socket.open();
+    socket.message({ type: "session.updated" });
+    client.appendAudio(Buffer.from([2]));
+
+    expect(terminalFailures).toEqual(["realtime_queue_overflow"]);
+    expect(socket.closed).toBe(true);
+    expect(events).toEqual([]);
+    expect(socket.sent).toEqual([]);
   });
 
   it("distinguishes intentional close from unexpected disconnect", () => {

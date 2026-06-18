@@ -5,6 +5,7 @@ import type { OpenAIRealtimeEvent } from "./RealtimeEventRouter.js";
 export interface RealtimeTranscriptionClient {
   appendAudio(pcm: Buffer): void;
   commit(): void;
+  clear(): void;
   close(): void;
 }
 
@@ -32,8 +33,17 @@ export interface RealtimeTranscriptionClientOptions {
   onEvent: (event: OpenAIRealtimeEvent) => void;
   onError: (error: Error) => void;
   onDisconnect: () => void;
+  onTerminalFailure?: (failure: RealtimeTerminalFailure) => void;
   socketFactory?: RealtimeSocketFactory;
   maxQueuedEvents?: number;
+  maxQueuedAudioBytes?: number;
+}
+
+export interface RealtimeTerminalFailure {
+  source: Source;
+  code: string;
+  message: string;
+  interruptedUtterance: boolean;
 }
 
 type RealtimeClientState =
@@ -47,8 +57,11 @@ type RealtimeClientState =
 export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionClient {
   private readonly socket: RealtimeSocket;
   private readonly maxQueuedEvents: number;
-  private readonly queuedEvents: unknown[] = [];
+  private readonly maxQueuedAudioBytes: number;
+  private readonly queuedEvents: Array<{ event: unknown; audioBytes: number }> = [];
+  private queuedAudioBytes = 0;
   private state: RealtimeClientState = "connecting";
+  private terminalNotified = false;
 
   constructor(private readonly options: RealtimeTranscriptionClientOptions) {
     const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(options.model)}`;
@@ -61,12 +74,12 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
       }
     });
     this.maxQueuedEvents = options.maxQueuedEvents ?? 128;
+    this.maxQueuedAudioBytes = options.maxQueuedAudioBytes ?? 4 * 1024 * 1024;
 
     this.socket.on("open", () => this.configureSession());
     this.socket.on("message", (data) => this.handleMessage(data));
     this.socket.on("error", (error) => {
-      this.state = "failed";
-      options.onError(error);
+      this.failTerminal("openai_realtime_error", error.message);
     });
     this.socket.on("close", () => this.handleClose());
   }
@@ -75,11 +88,15 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
     this.sendWhenReady({
       type: "input_audio_buffer.append",
       audio: pcm.toString("base64")
-    });
+    }, pcm.length);
   }
 
   commit(): void {
     this.sendWhenReady({ type: "input_audio_buffer.commit" });
+  }
+
+  clear(): void {
+    this.sendWhenReady({ type: "input_audio_buffer.clear" });
   }
 
   close(): void {
@@ -91,6 +108,9 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
   }
 
   private configureSession(): void {
+    if (this.state !== "connecting") {
+      return;
+    }
     this.state = "configuring";
     const transcription: Record<string, unknown> = {
       model: this.options.model,
@@ -122,6 +142,9 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
     try {
       const event = JSON.parse(data.toString()) as OpenAIRealtimeEvent;
       if (event.type === "session.updated") {
+        if (this.state !== "configuring") {
+          return;
+        }
         this.state = "ready";
         this.options.onEvent(event);
         this.flushQueuedEvents();
@@ -129,8 +152,7 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
       }
 
       if (event.type === "error") {
-        this.state = "failed";
-        this.options.onError(new Error(readRealtimeErrorMessage(event)));
+        this.failTerminal("openai_realtime_error", readRealtimeErrorMessage(event));
         return;
       }
 
@@ -140,35 +162,44 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
     }
   }
 
-  private sendWhenReady(event: unknown): void {
+  private sendWhenReady(event: unknown, audioBytes = 0): void {
     if (this.state === "ready") {
       this.sendImmediately(event);
       return;
     }
 
     if (this.state === "connecting" || this.state === "configuring") {
-      this.enqueueEvent(event);
+      this.enqueueEvent(event, audioBytes);
       return;
     }
 
     this.options.onError(new Error("Realtime transcription is not connected."));
   }
 
-  private enqueueEvent(event: unknown): void {
-    if (this.queuedEvents.length >= this.maxQueuedEvents) {
-      this.queuedEvents.length = 0;
-      this.state = "failed";
-      this.options.onError(new Error("Realtime readiness queue overflow."));
+  private enqueueEvent(event: unknown, audioBytes: number): void {
+    if (
+      this.queuedEvents.length >= this.maxQueuedEvents ||
+      this.queuedAudioBytes + audioBytes > this.maxQueuedAudioBytes
+    ) {
+      this.failTerminal(
+        "realtime_queue_overflow",
+        "Realtime readiness queue overflow."
+      );
       return;
     }
 
-    this.queuedEvents.push(event);
+    this.queuedEvents.push({ event, audioBytes });
+    this.queuedAudioBytes += audioBytes;
   }
 
   private flushQueuedEvents(): void {
     const events = this.queuedEvents.splice(0);
-    for (const event of events) {
+    this.queuedAudioBytes = 0;
+    for (const { event } of events) {
       this.sendImmediately(event);
+      if (this.state === "failed") {
+        return;
+      }
     }
   }
 
@@ -178,16 +209,43 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
       return;
     }
 
-    this.options.onError(new Error("Realtime socket is not open."));
+    this.failTerminal("openai_realtime_send_failed", "Realtime socket is not open.");
   }
 
   private handleClose(): void {
     const wasIntentional = this.state === "intentionallyClosing";
+    const wasFailed = this.state === "failed";
     this.state = "disconnected";
-    this.queuedEvents.length = 0;
-    if (!wasIntentional) {
+    this.clearQueue();
+    if (!wasIntentional && !wasFailed) {
       this.options.onDisconnect();
     }
+  }
+
+  private failTerminal(code: string, message: string): void {
+    if (this.state === "failed" || this.state === "disconnected" || this.state === "intentionallyClosing") {
+      return;
+    }
+
+    this.state = "failed";
+    this.clearQueue();
+    const error = new Error(message);
+    this.options.onError(error);
+    if (!this.terminalNotified) {
+      this.terminalNotified = true;
+      this.options.onTerminalFailure?.({
+        source: this.options.source,
+        code,
+        message,
+        interruptedUtterance: true
+      });
+    }
+    this.socket.close();
+  }
+
+  private clearQueue(): void {
+    this.queuedEvents.length = 0;
+    this.queuedAudioBytes = 0;
   }
 }
 

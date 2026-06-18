@@ -70,8 +70,10 @@ final class ApplicationController: ObservableObject {
     private var receiveTask: Task<Void, Never>?
     private var audioProcessingTask: Task<Void, Never>?
     private var mockTask: Task<Void, Never>?
-    private var audioContinuation: AsyncStream<AudioChunk>.Continuation?
+    private var audioPipe: BoundedAudioChunkPipe?
     private var sessionID = UUID()
+    private var sessionGeneration = UUID()
+    private var isCleaningUp = false
 
     init(defaults: UserDefaults = .standard) {
         if let storedMode = defaults.string(forKey: DefaultsKey.mode),
@@ -106,6 +108,7 @@ final class ApplicationController: ObservableObject {
         lastError = nil
         overlayState.resetSession()
         sessionID = UUID()
+        sessionGeneration = UUID()
 
         switch mode {
         case .localMock:
@@ -161,6 +164,7 @@ final class ApplicationController: ObservableObject {
         microphoneState = .requestingPermission
 
         let client = BackendWebSocketClient(url: url)
+        let generation = sessionGeneration
         let coordinator = AudioStreamCoordinator(
             detector: EnergySpeechEndpointDetector(),
             websocket: client
@@ -172,15 +176,20 @@ final class ApplicationController: ObservableObject {
 
         do {
             try await client.connect()
-            startReceiveLoop(client: client)
+            startReceiveLoop(client: client, generation: generation)
             try await coordinator.start(sessionID: sessionID, source: .microphone)
 
-            let (stream, continuation) = makeAudioStream()
-            audioContinuation = continuation
+            let pipe = BoundedAudioChunkPipe(limit: 48) { [weak self] in
+                Task { @MainActor [weak self] in
+                    await self?.handleAudioPipelineOverflow(generation: generation)
+                }
+            }
+            audioPipe = pipe
             audioProcessingTask = Task { [weak self, coordinator] in
                 do {
-                    for await chunk in stream {
+                    for await chunk in pipe.stream {
                         try Task.checkCancellation()
+                        guard self?.sessionGeneration == generation else { return }
                         try await coordinator.process(chunk)
                     }
                 } catch is CancellationError {
@@ -191,7 +200,7 @@ final class ApplicationController: ObservableObject {
             }
 
             try await microphone.start { chunk in
-                _ = continuation.yield(chunk)
+                pipe.yield(chunk)
             }
             runState = .listening
             microphoneState = .listening
@@ -207,17 +216,19 @@ final class ApplicationController: ObservableObject {
         }
     }
 
-    private func startReceiveLoop(client: BackendWebSocketClient) {
+    private func startReceiveLoop(client: BackendWebSocketClient, generation: UUID) {
         receiveTask?.cancel()
         receiveTask = Task { [weak self, client] in
             let stream = await client.receiveMessages()
             do {
                 for try await message in stream {
+                    guard self?.sessionGeneration == generation else { return }
                     self?.handleServerMessage(message)
                 }
             } catch is CancellationError {
                 return
             } catch {
+                guard self?.sessionGeneration == generation else { return }
                 self?.handleUnexpectedDisconnect(error)
             }
         }
@@ -255,6 +266,9 @@ final class ApplicationController: ObservableObject {
         guard runState != .idle, runState != .stopping else { return }
         microphoneState = .interrupted
         fail(userFacingMessage(for: error))
+        Task { [weak self] in
+            await self?.stopBackendResources(sendStop: false)
+        }
     }
 
     private func handleAudioProcessingError(_ error: Error) {
@@ -266,18 +280,34 @@ final class ApplicationController: ObservableObject {
     }
 
     private func stopBackendResources(sendStop: Bool) async {
-        runState = runState == .idle ? .idle : .stopping
+        if isCleaningUp {
+            return
+        }
+        isCleaningUp = true
+        defer { isCleaningUp = false }
+
+        if runState != .idle && runState != .failed {
+            runState = .stopping
+        }
 
         microphoneService?.stop()
         microphoneService = nil
-        audioContinuation?.finish()
-        audioContinuation = nil
+        audioPipe?.finish()
+        audioPipe = nil
         audioProcessingTask?.cancel()
         audioProcessingTask = nil
 
+        var cleanupError: Error?
         if sendStop, let audioCoordinator {
-            try? await audioCoordinator.stop(source: .microphone)
+            do {
+                try await audioCoordinator.stop(source: .microphone)
+            } catch {
+                cleanupError = error
+            }
         } else if let backendClient {
+            if let audioCoordinator {
+                try? await audioCoordinator.cancelActiveUtterance(reason: .captureInterrupted)
+            }
             await backendClient.disconnect()
         }
 
@@ -285,14 +315,25 @@ final class ApplicationController: ObservableObject {
         receiveTask = nil
         audioCoordinator = nil
         backendClient = nil
+
+        if let cleanupError, lastError == nil {
+            lastError = userFacingMessage(for: cleanupError)
+        }
     }
 
-    private func makeAudioStream() -> (AsyncStream<AudioChunk>, AsyncStream<AudioChunk>.Continuation) {
-        var continuation: AsyncStream<AudioChunk>.Continuation!
-        let stream = AsyncStream<AudioChunk>(bufferingPolicy: .bufferingNewest(48)) {
-            continuation = $0
+    private func handleAudioPipelineOverflow(generation: UUID) async {
+        guard sessionGeneration == generation else { return }
+        microphoneState = .interrupted
+        lastError = "Audio pipeline overflow interrupted the current microphone session."
+        overlayState.apply(.recoverableError(RecoverableErrorMessage(
+            code: "audio_pipeline_overflow",
+            message: "Audio pipeline overflow interrupted the current microphone session."
+        )))
+        if let audioCoordinator {
+            try? await audioCoordinator.cancelActiveUtterance(reason: .audioPipelineOverflow)
         }
-        return (stream, continuation)
+        await stopBackendResources(sendStop: true)
+        runState = .failed
     }
 
     private func fail(_ message: String) {

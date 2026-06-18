@@ -106,6 +106,32 @@ public struct UtteranceCommitMessage: Codable, Equatable, Sendable {
     }
 }
 
+public enum UtteranceCancelReason: String, Codable, Equatable, Sendable {
+    case minimumSpeechDurationNotMet = "minimum_speech_duration_not_met"
+    case audioPipelineOverflow = "audio_pipeline_overflow"
+    case captureInterrupted = "capture_interrupted"
+    case userInterrupted = "user_interrupted"
+    case applicationShutdown = "application_shutdown"
+}
+
+public struct UtteranceCancelMessage: Codable, Equatable, Sendable {
+    public let clientUtteranceID: String
+    public let sequence: Int
+    public let reason: UtteranceCancelReason
+
+    public init(clientUtteranceID: String, sequence: Int, reason: UtteranceCancelReason) {
+        self.clientUtteranceID = clientUtteranceID
+        self.sequence = sequence
+        self.reason = reason
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case clientUtteranceID = "client_utterance_id"
+        case sequence
+        case reason
+    }
+}
+
 public struct StopStreamMessage: Codable, Equatable, Sendable {
     public let source: AudioSource
 
@@ -119,6 +145,7 @@ public enum ClientControlMessage: Codable, Equatable, Sendable {
     case startStream(StartStreamMessage)
     case utteranceStart(UtteranceStartMessage)
     case utteranceCommit(UtteranceCommitMessage)
+    case utteranceCancel(UtteranceCancelMessage)
     case stopStream(StopStreamMessage)
 
     enum CodingKeys: String, CodingKey {
@@ -130,6 +157,7 @@ public enum ClientControlMessage: Codable, Equatable, Sendable {
         case startStream = "start_stream"
         case utteranceStart = "utterance_start"
         case utteranceCommit = "utterance_commit"
+        case utteranceCancel = "utterance_cancel"
         case stopStream = "stop_stream"
     }
 
@@ -144,6 +172,8 @@ public enum ClientControlMessage: Codable, Equatable, Sendable {
             self = .utteranceStart(try UtteranceStartMessage(from: decoder))
         case .utteranceCommit:
             self = .utteranceCommit(try UtteranceCommitMessage(from: decoder))
+        case .utteranceCancel:
+            self = .utteranceCancel(try UtteranceCancelMessage(from: decoder))
         case .stopStream:
             self = .stopStream(try StopStreamMessage(from: decoder))
         }
@@ -163,6 +193,9 @@ public enum ClientControlMessage: Codable, Equatable, Sendable {
             try message.encode(to: encoder)
         case let .utteranceCommit(message):
             try container.encode(MessageType.utteranceCommit, forKey: .type)
+            try message.encode(to: encoder)
+        case let .utteranceCancel(message):
+            try container.encode(MessageType.utteranceCancel, forKey: .type)
             try message.encode(to: encoder)
         case let .stopStream(message):
             try container.encode(MessageType.stopStream, forKey: .type)

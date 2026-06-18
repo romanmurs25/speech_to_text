@@ -110,7 +110,7 @@ public final class EnergySpeechEndpointDetector: SpeechEndpointDetector {
                 } else {
                     events.append(.utteranceDiscarded(reason: "minimum_speech_duration_not_met"))
                 }
-                resetAfterUtterance(trailingPreRoll: isSpeech ? [] : samples)
+                resetAfterUtterance()
             }
         }
 
@@ -128,15 +128,13 @@ public final class EnergySpeechEndpointDetector: SpeechEndpointDetector {
         noiseFloor = settings.initialNoiseFloor
     }
 
-    private func resetAfterUtterance(trailingPreRoll: [Int16] = []) {
+    private func resetAfterUtterance() {
         state = .idle
         pendingSpeech.removeAll(keepingCapacity: true)
         speechStartCandidateMs = nil
         utteranceStartedAtMs = nil
         silenceStartedAtMs = nil
         nonSilentSamples = 0
-        preRoll.removeAll(keepingCapacity: true)
-        appendPreRoll(trailingPreRoll)
     }
 
     private func appendPreRoll(_ samples: [Int16]) {

@@ -16,6 +16,11 @@ import {
 } from "./ws/messageLimits.js";
 
 export async function createApp(config: ServerConfig = loadConfig()) {
+  const openAIApiKey = config.openAIApiKey?.trim();
+  if (!config.mockOpenAI && !openAIApiKey) {
+    throw new Error("OPENAI_API_KEY is required when MOCK_OPENAI=false");
+  }
+
   const logger = createLogger(config.logLevel);
   const app = Fastify({ loggerInstance: logger });
 
@@ -30,10 +35,10 @@ export async function createApp(config: ServerConfig = loadConfig()) {
   }));
 
   const overlayResponseClient =
-    config.mockOpenAI || !config.openAIApiKey
+    config.mockOpenAI
       ? new MockOpenAIResponsesClient()
       : new OpenAIResponsesClient({
-          apiKey: config.openAIApiKey,
+          apiKey: openAIApiKey ?? "",
           model: config.openAITextModel
         });
 
@@ -55,31 +60,37 @@ export async function createApp(config: ServerConfig = loadConfig()) {
       mockMode: config.mockOpenAI,
       overlayResponseClient,
       send: (message) => ws.send(JSON.stringify(message)),
+      terminate: () => ws.close(1008, "ambiguous_audio_routing"),
       realtimeClientFactory: (message) => {
-        if (!config.openAIApiKey) {
-          throw new Error("OPENAI_API_KEY is required when MOCK_OPENAI=false");
-        }
         return new OpenAIRealtimeTranscriptionClient({
-          apiKey: config.openAIApiKey,
+          apiKey: openAIApiKey ?? "",
           model: config.openAIRealtimeModel,
           delay: config.openAIRealtimeDelay,
           source: message.source,
           languageHint: message.language_hint,
           onEvent: (event) => {
-            void manager.handleRealtimeEvent(event);
+            void manager.handleRealtimeEvent(event).catch((error: unknown) => {
+              logger.warn(
+                { event: redactForLog({ error: error instanceof Error ? error.message : String(error) }) },
+                "Realtime event routing error"
+              );
+              ws.send(
+                JSON.stringify({
+                  type: "recoverable_error",
+                  code: "realtime_event_routing_failed",
+                  message: "Transcription event routing failed safely."
+                })
+              );
+            });
           },
           onError: (error) => {
             logger.warn({ event: redactForLog({ error: error.message }) }, "Realtime error");
-            ws.send(
-              JSON.stringify({
-                type: "recoverable_error",
-                code: "openai_realtime_error",
-                message: "Transcription is temporarily unavailable."
-              })
-            );
           },
           onDisconnect: () => {
             manager.handleRealtimeDisconnect(message.source);
+          },
+          onTerminalFailure: (failure) => {
+            manager.handleRealtimeFailure(message.source, failure);
           }
         });
       }
@@ -122,7 +133,20 @@ export async function createApp(config: ServerConfig = loadConfig()) {
           return;
         }
 
-        void manager.handleControl(parsed.value);
+        void manager.handleControl(parsed.value).catch((error: unknown) => {
+          logger.warn(
+            { event: redactForLog({ error: error instanceof Error ? error.message : String(error) }) },
+            "Client control handling failed"
+          );
+          ws.send(
+            JSON.stringify({
+              type: "fatal_error",
+              code: "internal_control_error",
+              message: "The session entered an unsafe protocol state."
+            })
+          );
+          ws.close(1011, "internal_control_error");
+        });
       } catch {
         ws.send(
           JSON.stringify({

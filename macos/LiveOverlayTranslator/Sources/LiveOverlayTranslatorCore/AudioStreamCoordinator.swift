@@ -77,6 +77,7 @@ public actor AudioStreamCoordinator {
         for event in events {
             switch event {
             case let .speechStarted(startedAtMs, initialSamples):
+                guard activeUtteranceID == nil else { continue }
                 sequence += 1
                 let utteranceID = UUID().uuidString
                 activeUtteranceID = utteranceID
@@ -105,19 +106,49 @@ public actor AudioStreamCoordinator {
                 self.activeSource = nil
 
             case .utteranceDiscarded:
-                if let source = activeSource {
-                    try await websocket.send(.stopStream(StopStreamMessage(source: source)))
-                    try await websocket.send(.startStream(StartStreamMessage(source: source)))
-                }
-                activeUtteranceID = nil
-                activeSource = nil
+                try await cancelActiveUtterance(reason: .minimumSpeechDurationNotMet)
             }
         }
     }
 
+    public func cancelActiveUtterance(reason: UtteranceCancelReason) async throws {
+        detector.reset()
+        guard let activeUtteranceID else {
+            activeSource = nil
+            return
+        }
+
+        let cancel = UtteranceCancelMessage(
+            clientUtteranceID: activeUtteranceID,
+            sequence: sequence,
+            reason: reason
+        )
+        self.activeUtteranceID = nil
+        self.activeSource = nil
+        try await websocket.send(.utteranceCancel(cancel))
+    }
+
     public func stop(source: AudioSource) async throws {
-        try await websocket.send(.stopStream(StopStreamMessage(source: source)))
+        var firstError: Error?
+        do {
+            try await cancelActiveUtterance(reason: .userInterrupted)
+        } catch {
+            firstError = error
+        }
+        do {
+            try await websocket.send(.stopStream(StopStreamMessage(source: source)))
+        } catch {
+            if firstError == nil {
+                firstError = error
+            }
+        }
         await websocket.disconnect()
+        detector.reset()
+        activeUtteranceID = nil
+        activeSource = nil
+        if let firstError {
+            throw firstError
+        }
     }
 
     private func sendSamples(_ samples: [Int16]) async throws {

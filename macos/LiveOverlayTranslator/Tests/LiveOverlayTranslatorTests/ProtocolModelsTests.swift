@@ -16,6 +16,22 @@ func helloMessageRoundTrips() throws {
 }
 
 @Test
+func utteranceCancelMessageRoundTrips() throws {
+    let message = ClientControlMessage.utteranceCancel(UtteranceCancelMessage(
+        clientUtteranceID: "client-1",
+        sequence: 12,
+        reason: .minimumSpeechDurationNotMet
+    ))
+
+    let data = try JSONEncoder.protocolEncoder.encode(message)
+    let decoded = try JSONDecoder.protocolDecoder.decode(ClientControlMessage.self, from: data)
+
+    #expect(decoded == message)
+    #expect(String(data: data, encoding: .utf8)?.contains("utterance_cancel") == true)
+    #expect(String(data: data, encoding: .utf8)?.contains("minimum_speech_duration_not_met") == true)
+}
+
+@Test
 func sessionStateReadyDecodesFirstBackendResponse() throws {
     let data = """
     {

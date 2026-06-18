@@ -8,7 +8,7 @@ export class MockOpenAIResponsesClient implements OverlayResponseClient {
       utterance_id: envelope.utterance_id,
       detected_language: "en",
       original_text: envelope.source_text,
-      translation_ru: `${envelope.source_text} in Russian`,
+      translation_ru: "Не могли бы вы прислать мне обновлённое предложение к пятнице?",
       translation_en: envelope.source_text,
       reply_needed: replyNeeded,
       suggested_reply_ru: replyNeeded ? "Yes, I will follow up on that." : "",

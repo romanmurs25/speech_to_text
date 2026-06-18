@@ -55,7 +55,9 @@ describe("ClientSessionManager", () => {
       sequence: 1,
       result: {
         utterance_id: "mock-item-1",
-        original_text: "Could you send me the revised proposal by Friday?"
+        original_text: "Could you send me the revised proposal by Friday?",
+        translation_ru: "Не могли бы вы прислать мне обновлённое предложение к пятнице?",
+        reply_needed: false
       }
     });
   });
@@ -100,7 +102,7 @@ describe("ClientSessionManager", () => {
       {
         type: "recoverable_error",
         code: "openai_realtime_disconnected",
-        message: "Transcription disconnected. The interrupted utterance was not replayed automatically."
+        message: "Transcription disconnected. The interrupted utterance was not committed or replayed."
       }
     ]);
   });
@@ -143,7 +145,7 @@ describe("ClientSessionManager", () => {
     expect(microphoneClient.commits).toBe(1);
   });
 
-  it("rejects overlapping utterances without overwriting active audio routing", async () => {
+  it("cancels a short utterance with Realtime clear and accepts the next utterance", async () => {
     const messages: unknown[] = [];
     const microphoneClient = new RecordingRealtimeClient();
     const manager = new ClientSessionManager({
@@ -151,6 +153,119 @@ describe("ClientSessionManager", () => {
       overlayResponseClient: new MockOpenAIResponsesClient(),
       send: (message) => messages.push(message),
       realtimeClientFactory: () => microphoneClient
+    });
+
+    await manager.handleControl({
+      type: "start_stream",
+      source: "microphone",
+      sample_rate: 24000,
+      channels: 1,
+      encoding: "pcm_s16le",
+      language_hint: null
+    });
+    await manager.handleControl({
+      type: "utterance_start",
+      client_utterance_id: "too-short",
+      source: "microphone",
+      speaker: "local",
+      sequence: 1,
+      started_at_ms: 100
+    });
+    manager.handleAudio(Buffer.from([1, 2, 3, 4]));
+    await manager.handleControl({
+      type: "utterance_cancel",
+      client_utterance_id: "too-short",
+      sequence: 1,
+      reason: "minimum_speech_duration_not_met"
+    });
+    await manager.handleControl({
+      type: "utterance_commit",
+      client_utterance_id: "too-short",
+      sequence: 1,
+      ended_at_ms: 150
+    });
+    await manager.handleControl({
+      type: "utterance_start",
+      client_utterance_id: "normal",
+      source: "microphone",
+      speaker: "local",
+      sequence: 2,
+      started_at_ms: 200
+    });
+    manager.handleAudio(Buffer.from([5, 6]));
+    await manager.handleControl({
+      type: "utterance_commit",
+      client_utterance_id: "normal",
+      sequence: 2,
+      ended_at_ms: 400
+    });
+
+    expect(microphoneClient.appendedBytes).toBe(6);
+    expect(microphoneClient.clears).toBe(1);
+    expect(microphoneClient.commits).toBe(1);
+    expect(messages).toContainEqual({
+      type: "recoverable_error",
+      code: "utterance_not_committable",
+      message: "The utterance is not active and cannot be committed.",
+      client_utterance_id: "too-short"
+    });
+  });
+
+  it("deduplicates duplicate starts and commits before they reach Realtime", async () => {
+    const microphoneClient = new RecordingRealtimeClient();
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: new MockOpenAIResponsesClient(),
+      send: () => {},
+      realtimeClientFactory: () => microphoneClient
+    });
+
+    await manager.handleControl({
+      type: "start_stream",
+      source: "microphone",
+      sample_rate: 24000,
+      channels: 1,
+      encoding: "pcm_s16le",
+      language_hint: null
+    });
+    const start = {
+      type: "utterance_start" as const,
+      client_utterance_id: "client-dup",
+      source: "microphone" as const,
+      speaker: "local" as const,
+      sequence: 1,
+      started_at_ms: 100
+    };
+    await manager.handleControl(start);
+    await manager.handleControl(start);
+    await manager.handleControl({
+      type: "utterance_commit",
+      client_utterance_id: "client-dup",
+      sequence: 1,
+      ended_at_ms: 200
+    });
+    await manager.handleControl({
+      type: "utterance_commit",
+      client_utterance_id: "client-dup",
+      sequence: 1,
+      ended_at_ms: 200
+    });
+
+    expect(microphoneClient.commits).toBe(1);
+  });
+
+  it("fails closed on overlapping utterances so following audio is not routed ambiguously", async () => {
+    const messages: unknown[] = [];
+    const microphoneClient = new RecordingRealtimeClient();
+    let terminated = false;
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: new MockOpenAIResponsesClient(),
+      send: (message) => messages.push(message),
+      realtimeClientFactory: () => microphoneClient,
+      terminate: () => {
+        terminated = true;
+      }
     });
 
     await manager.handleControl({
@@ -192,14 +307,59 @@ describe("ClientSessionManager", () => {
       ended_at_ms: 220
     });
 
-    expect(messages).toContainEqual({
-      type: "recoverable_error",
-      code: "overlapping_utterance_rejected",
-      message: "Only one microphone utterance can be active at a time.",
-      client_utterance_id: "client-b"
+    expect(messages).toEqual([
+      {
+        type: "fatal_error",
+        code: "ambiguous_audio_routing",
+        message: "The audio stream entered an ambiguous utterance state."
+      }
+    ]);
+    expect(terminated).toBe(true);
+    expect(microphoneClient.appendedBytes).toBe(0);
+    expect(microphoneClient.commits).toBe(0);
+    expect(microphoneClient.clears).toBe(1);
+  });
+
+  it("clears active and pending state on stop_stream", async () => {
+    const microphoneClient = new RecordingRealtimeClient();
+    const messages: unknown[] = [];
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: new MockOpenAIResponsesClient(),
+      send: (message) => messages.push(message),
+      realtimeClientFactory: () => microphoneClient
     });
-    expect(microphoneClient.appendedBytes).toBe(4);
-    expect(microphoneClient.commits).toBe(1);
+
+    await manager.handleControl({
+      type: "start_stream",
+      source: "microphone",
+      sample_rate: 24000,
+      channels: 1,
+      encoding: "pcm_s16le",
+      language_hint: null
+    });
+    await manager.handleControl({
+      type: "utterance_start",
+      client_utterance_id: "client-stop",
+      source: "microphone",
+      speaker: "local",
+      sequence: 1,
+      started_at_ms: 100
+    });
+    await manager.handleControl({
+      type: "stop_stream",
+      source: "microphone"
+    });
+    await manager.handleControl({
+      type: "utterance_commit",
+      client_utterance_id: "client-stop",
+      sequence: 1,
+      ended_at_ms: 200
+    });
+
+    expect(microphoneClient.clears).toBe(1);
+    expect(microphoneClient.closes).toBe(1);
+    expect(microphoneClient.commits).toBe(0);
   });
 
   it("rejects system audio start safely in P0 mode", async () => {
@@ -333,6 +493,7 @@ class RecordingRealtimeClient implements RealtimeTranscriptionClient {
   appendedBytes = 0;
   commits = 0;
   closes = 0;
+  clears = 0;
 
   appendAudio(pcm: Buffer): void {
     this.appendedBytes += pcm.length;
@@ -340,6 +501,10 @@ class RecordingRealtimeClient implements RealtimeTranscriptionClient {
 
   commit(): void {
     this.commits += 1;
+  }
+
+  clear(): void {
+    this.clears += 1;
   }
 
   close(): void {

@@ -46,9 +46,9 @@ public struct MockOverlayEventSource: Sendable {
                         originalText: "Could you send me the revised proposal by Friday?",
                         translationRU: "Не могли бы вы прислать мне обновлённое предложение к пятнице?",
                         translationEN: "Could you send me the revised proposal by Friday?",
-                        replyNeeded: true,
-                        suggestedReplyRU: "Да, я закончу правки и отправлю обновлённую версию к пятнице.",
-                        suggestedReplyEN: "Yes, I'll finish the revisions and send you the updated version by Friday."
+                        replyNeeded: false,
+                        suggestedReplyRU: "",
+                        suggestedReplyEN: ""
                     )
                 )))
                 continuation.finish()

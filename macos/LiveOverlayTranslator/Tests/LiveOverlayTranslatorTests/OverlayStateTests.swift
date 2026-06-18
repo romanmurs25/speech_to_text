@@ -27,6 +27,58 @@ func appliesSessionStateAndFatalErrorTransitions() {
 
 @MainActor
 @Test
+func recoverableTranslationErrorRemovesPendingSpinnerButKeepsTranscript() {
+    let state = OverlayState()
+    state.apply(.transcriptCompleted(TranscriptCompleted(
+        clientUtteranceID: "client-1",
+        openAIItemID: "item-1",
+        sequence: 1,
+        source: .microphone,
+        speaker: .local,
+        transcript: "Could you send it?"
+    )))
+    #expect(state.pendingTranslationIDs.contains("client-1"))
+
+    state.apply(.recoverableError(RecoverableErrorMessage(
+        code: "translation_failed",
+        message: "Translation failed.",
+        clientUtteranceID: "client-1"
+    )))
+
+    #expect(!state.pendingTranslationIDs.contains("client-1"))
+    #expect(state.cards.first?.originalTranscript == "Could you send it?")
+}
+
+@MainActor
+@Test
+func fatalErrorClearsAllPendingState() {
+    let state = OverlayState()
+    state.apply(.transcriptDelta(TranscriptDelta(
+        clientUtteranceID: "client-1",
+        openAIItemID: "item-1",
+        sequence: 1,
+        source: .microphone,
+        speaker: .local,
+        delta: "Could"
+    )))
+    state.apply(.transcriptCompleted(TranscriptCompleted(
+        clientUtteranceID: "client-1",
+        openAIItemID: "item-1",
+        sequence: 1,
+        source: .microphone,
+        speaker: .local,
+        transcript: "Could you send it?"
+    )))
+
+    state.apply(.fatalError(FatalErrorMessage(code: "ambiguous_audio_routing", message: "fatal")))
+
+    #expect(state.provisionalText == "")
+    #expect(state.pendingTranslationIDs.isEmpty)
+    #expect(state.cards.first?.originalTranscript == "Could you send it?")
+}
+
+@MainActor
+@Test
 func staleResultForUnknownUtteranceDoesNotOverwriteNewerCard() {
     let state = OverlayState()
     state.apply(.transcriptCompleted(TranscriptCompleted(

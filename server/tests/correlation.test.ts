@@ -11,6 +11,7 @@ describe("utterance correlation", () => {
       speaker: "local",
       startedAtMs: 100
     });
+    store.requestCommit("client-a", 7, 200);
 
     const committed = store.markCommitted("item-a");
 
@@ -27,6 +28,7 @@ describe("utterance correlation", () => {
       speaker: "local",
       startedAtMs: 100
     });
+    store.requestCommit("client-a", 1, 150);
     store.enqueue({
       clientUtteranceId: "client-b",
       sequence: 2,
@@ -34,6 +36,7 @@ describe("utterance correlation", () => {
       speaker: "remote",
       startedAtMs: 200
     });
+    store.requestCommit("client-b", 2, 250);
 
     store.markCommitted("item-a");
     store.markCommitted("item-b");
@@ -51,6 +54,7 @@ describe("utterance correlation", () => {
       speaker: "local",
       startedAtMs: 100
     });
+    store.requestCommit("client-a", 1, 150);
     store.markCommitted("item-a");
 
     expect(store.complete("item-a", "first")?.transcript).toBe("first");

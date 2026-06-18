@@ -4,6 +4,13 @@ export const ProtocolVersionSchema = z.literal(1);
 export const SourceSchema = z.enum(["microphone", "systemAudio"]);
 export const SpeakerSchema = z.enum(["local", "remote"]);
 export const EncodingSchema = z.literal("pcm_s16le");
+export const UtteranceCancelReasonSchema = z.enum([
+  "minimum_speech_duration_not_met",
+  "audio_pipeline_overflow",
+  "capture_interrupted",
+  "user_interrupted",
+  "application_shutdown"
+]);
 
 const ClientUtteranceIdSchema = z.string().min(1);
 const SequenceSchema = z.number().int().nonnegative();
@@ -50,6 +57,13 @@ export const UtteranceCommitMessageSchema = z.object({
   ended_at_ms: TimestampMsSchema
 });
 
+export const UtteranceCancelMessageSchema = z.object({
+  type: z.literal("utterance_cancel"),
+  client_utterance_id: ClientUtteranceIdSchema,
+  sequence: SequenceSchema,
+  reason: UtteranceCancelReasonSchema
+});
+
 export const StopStreamMessageSchema = z.object({
   type: z.literal("stop_stream"),
   source: SourceSchema
@@ -60,6 +74,7 @@ export const ClientControlMessageSchema = z.discriminatedUnion("type", [
   StartStreamMessageSchema,
   UtteranceStartMessageSchema,
   UtteranceCommitMessageSchema,
+  UtteranceCancelMessageSchema,
   StopStreamMessageSchema
 ]);
 
@@ -152,6 +167,7 @@ export const ServerMessageSchema = z.discriminatedUnion("type", [
 export type ClientControlMessage = z.infer<typeof ClientControlMessageSchema>;
 export type Source = z.infer<typeof SourceSchema>;
 export type Speaker = z.infer<typeof SpeakerSchema>;
+export type UtteranceCancelReason = z.infer<typeof UtteranceCancelReasonSchema>;
 export type DialogueTurn = z.infer<typeof DialogueTurnSchema>;
 export type FinalUtteranceEnvelope = z.infer<typeof FinalUtteranceEnvelopeSchema>;
 export type OverlayResult = z.infer<typeof OverlayResultSchema>;

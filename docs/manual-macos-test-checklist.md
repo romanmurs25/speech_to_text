@@ -10,10 +10,10 @@ Use a physical Mac with full Xcode selected by `xcode-select`, a development bui
 4. Confirm the overlay shows provisional text first.
 5. Confirm a finalized transcript card appears.
 6. Confirm pending translation is visible before the result.
-7. Confirm Russian and English translations and suggested replies appear.
+7. Confirm Russian and English translations appear and suggested replies are empty for the local microphone mock.
 8. Click `Stop Listening`.
 
-Expected result: one deterministic mock card appears; no backend connection, microphone permission, or API key is required.
+Expected result: one deterministic microphone/local mock card appears; no backend connection, microphone permission, or API key is required.
 
 ## 2. Microphone Permission
 
@@ -44,6 +44,27 @@ Expected result: permission denial is handled; granted permission allows capture
 
 Expected result: local speech is labeled `local`; exactly one final card is created.
 
+## 3A. Short Utterance Cancellation
+
+1. Start backend with `MOCK_OPENAI=true` or `MOCK_OPENAI=false`.
+2. Start Backend microphone mode in the app.
+3. Make a very short click, cough, or clipped syllable shorter than the minimum speech duration.
+4. Confirm no transcript card or pending translation remains for that discarded sound.
+5. Speak a normal phrase immediately afterward.
+6. Confirm the normal phrase creates exactly one final card.
+
+Expected result: the app sends `utterance_cancel` with `minimum_speech_duration_not_met`; the backend does not commit or translate the discarded utterance.
+
+## 3B. Stop And Interrupt Cleanup
+
+1. Start Backend microphone mode.
+2. Begin speaking a phrase.
+3. Click `Stop Listening` before endpoint detection commits it.
+4. Confirm microphone capture stops, the WebSocket disconnects, and pending overlay translation state is cleared.
+5. Start listening again and speak a normal phrase.
+
+Expected result: user stop cancels the active utterance, clears the Realtime input buffer, disconnects cleanly even if stop control delivery fails, and the next session starts fresh.
+
 ## 4. Real OpenAI Microphone
 
 1. Start backend with `MOCK_OPENAI=false` and a valid backend-only `OPENAI_API_KEY`.
@@ -60,6 +81,30 @@ Expected result: local speech is labeled `local`; exactly one final card is crea
 
 Expected result: real microphone transcription and translation work through the backend; the key remains backend-only.
 
+## 4A. Real Mode Missing API Key
+
+1. Start backend with `MOCK_OPENAI=false` and no `OPENAI_API_KEY`.
+2. Confirm the backend fails during startup before accepting microphone sessions.
+
+Expected result: real mode refuses to listen without a backend-only OpenAI API key.
+
+## 4B. Realtime Disconnect Or Overflow
+
+1. Start Backend microphone mode against a real or instrumented backend.
+2. Force a Realtime socket close, Realtime error, or readiness queue overflow.
+3. Confirm only one recoverable error is shown.
+4. Confirm the interrupted utterance is not replayed, committed, or translated.
+5. Confirm a new user-started session can reconnect.
+
+Expected result: Realtime failures are terminal for the current Realtime client and late readiness events do not revive it.
+
+## 4C. Ambiguous Audio Routing Negative Test
+
+1. Use a protocol harness or backend unit test to send a second `utterance_start` with a different `client_utterance_id` while another utterance is active.
+2. Send binary audio after the second start.
+
+Expected result: backend emits fatal `ambiguous_audio_routing`, clears the input buffer when present, terminates the WebSocket, and ignores following audio.
+
 ## 5. Overlay Behavior
 
 1. Launch app in Local Mock mode.
@@ -74,7 +119,7 @@ Expected result: overlay remains usable and does not steal activation during pre
 
 1. Confirm there is no user-facing Start System Audio control in the P0 UI.
 2. Confirm any internal `SystemAudioCaptureService.start` path returns `systemAudioUnavailable`.
-3. Confirm documentation does not claim system audio works.
+3. Confirm documentation states that system audio is unavailable in P0.
 
 Expected result: system audio is clearly unavailable and cannot silently start.
 

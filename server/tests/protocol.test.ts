@@ -28,6 +28,26 @@ describe("client protocol validation", () => {
     ).toBe("start_stream");
   });
 
+  it("accepts utterance_cancel control messages with controlled reasons", () => {
+    expect(
+      ClientControlMessageSchema.parse({
+        type: "utterance_cancel",
+        client_utterance_id: "client-1",
+        sequence: 12,
+        reason: "minimum_speech_duration_not_met"
+      }).type
+    ).toBe("utterance_cancel");
+
+    expect(() =>
+      ClientControlMessageSchema.parse({
+        type: "utterance_cancel",
+        client_utterance_id: "client-1",
+        sequence: 12,
+        reason: "not_a_reason"
+      })
+    ).toThrow();
+  });
+
   it("rejects malformed control messages without leaking parser details", () => {
     const parsed = parseClientControlMessage({
       type: "utterance_start",

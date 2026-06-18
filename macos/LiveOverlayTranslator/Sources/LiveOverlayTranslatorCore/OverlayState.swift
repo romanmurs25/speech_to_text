@@ -63,6 +63,9 @@ public final class OverlayState: ObservableObject {
                 connectionStatus = .degraded("session_degraded")
             case .closed:
                 connectionStatus = .closed
+                provisionalText = ""
+                provisionalByUtterance.removeAll(keepingCapacity: true)
+                pendingTranslationIDs.removeAll(keepingCapacity: true)
             }
 
         case let .transcriptDelta(delta):
@@ -87,10 +90,16 @@ public final class OverlayState: ObservableObject {
 
         case let .recoverableError(error):
             recoverableError = error.message
+            if let clientUtteranceID = error.clientUtteranceID {
+                pendingTranslationIDs.remove(clientUtteranceID)
+            }
             connectionStatus = .degraded(error.code)
 
         case let .fatalError(error):
             recoverableError = error.message
+            provisionalText = ""
+            provisionalByUtterance.removeAll(keepingCapacity: true)
+            pendingTranslationIDs.removeAll(keepingCapacity: true)
             connectionStatus = .failed(error.code)
         }
     }

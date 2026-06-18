@@ -4,7 +4,7 @@
 
 The macOS app connects to the backend over WebSocket. Development may use `ws://127.0.0.1:8787/ws`; production must use WSS behind TLS. JSON control messages and binary PCM audio frames share the same connection.
 
-The P0 app exposes microphone only. `systemAudio` remains a reserved protocol value for future work, but the current session manager rejects unsupported system-audio starts and overlapping active utterances because binary audio frames do not carry a stream identifier.
+The P0 app exposes microphone only. `systemAudio` remains a reserved protocol value for future work, but the current session manager rejects unsupported system-audio starts and terminates ambiguous overlapping utterances because binary audio frames do not carry a stream identifier.
 
 Server limits:
 
@@ -67,7 +67,7 @@ If the user selects an input language, `language_hint` is an ISO-639-1 language 
 
 ### binary audio frame
 
-Binary frames contain raw PCM S16LE audio for the currently active microphone utterance. The frame is ignored or rejected if there is no active accepted utterance. A second overlapping `utterance_start` is rejected with a recoverable protocol error.
+Binary frames contain raw PCM S16LE audio for the currently active microphone utterance. The frame is ignored if there is no active accepted utterance. A second overlapping `utterance_start` for a different active utterance fails closed with fatal code `ambiguous_audio_routing`, clears the OpenAI input buffer when present, terminates the WebSocket, and ignores following audio.
 
 ### utterance_commit
 
@@ -80,6 +80,29 @@ Binary frames contain raw PCM S16LE audio for the currently active microphone ut
 }
 ```
 
+`utterance_commit` is accepted once for an active utterance. Duplicate commits for the same utterance are ignored after the first accepted commit. A commit after cancellation produces `utterance_not_committable` and does not call OpenAI commit or Responses.
+
+### utterance_cancel
+
+```json
+{
+  "type": "utterance_cancel",
+  "client_utterance_id": "43D0BE98-B87F-4413-9D56-1A8DD9C157EE",
+  "sequence": 12,
+  "reason": "minimum_speech_duration_not_met"
+}
+```
+
+`reason` is one of:
+
+- `minimum_speech_duration_not_met`
+- `audio_pipeline_overflow`
+- `capture_interrupted`
+- `user_interrupted`
+- `application_shutdown`
+
+Cancellation is valid only before an utterance has been committed. The backend cancels the pending correlation record, clears the active utterance, sends OpenAI `input_audio_buffer.clear` for real Realtime sessions, and must not emit transcript or overlay result messages for that utterance. Duplicate cancellation is idempotent.
+
 ### stop_stream
 
 ```json
@@ -88,6 +111,8 @@ Binary frames contain raw PCM S16LE audio for the currently active microphone ut
   "source": "microphone"
 }
 ```
+
+`stop_stream` cancels uncommitted microphone utterances as `user_interrupted`, clears the OpenAI buffer when present, and closes the Realtime session. The macOS client also sends `utterance_cancel` for a user stop before disconnect cleanup.
 
 ## Server Messages
 
@@ -144,11 +169,11 @@ Only this message type may trigger a Responses API request.
     "utterance_id": "item_003",
     "detected_language": "en",
     "original_text": "Could you send me the revised proposal by Friday?",
-    "translation_ru": "Could you send me the revised proposal by Friday? in Russian",
+    "translation_ru": "Не могли бы вы прислать мне обновлённое предложение к пятнице?",
     "translation_en": "Could you send me the revised proposal by Friday?",
-    "reply_needed": true,
-    "suggested_reply_ru": "Yes, I will send the revised proposal by Friday.",
-    "suggested_reply_en": "Yes, I will send the revised proposal by Friday."
+    "reply_needed": false,
+    "suggested_reply_ru": "",
+    "suggested_reply_en": ""
   }
 }
 ```
@@ -169,10 +194,12 @@ Only this message type may trigger a Responses API request.
 ```json
 {
   "type": "fatal_error",
-  "code": "protocol_violation",
-  "message": "Malformed client message."
+  "code": "ambiguous_audio_routing",
+  "message": "The audio stream entered an ambiguous utterance state."
 }
 ```
+
+Fatal errors terminate the current WebSocket session. Recoverable errors may clear overlay pending state for the referenced `client_utterance_id`; fatal errors clear all pending overlay state.
 
 ## Final Utterance Envelope
 
@@ -208,8 +235,12 @@ The backend deduplicates by `session_id` plus `utterance_id`.
 
 ## Ordering Rules
 
+- An utterance lifecycle is `active -> commitRequested -> correlated -> completed`; cancellation moves uncommitted utterances to `cancelled`.
+- A cancelled utterance cannot later be committed, correlated, completed, translated, or replayed.
 - Deltas update only their matching `client_utterance_id`.
 - Final transcripts replace provisional text for the same utterance.
 - Overlay results apply only if the `sequence` and `client_utterance_id` match a known finalized utterance.
 - Older results never overwrite a newer utterance card.
 - Completion events may arrive out of order and must be reconciled by OpenAI item ID.
+- OpenAI `input_audio_buffer.cleared` is accepted as an internal acknowledgement and does not produce an app-visible server message.
+- Realtime readiness queues are bounded by event count and byte size. Queue overflow is terminal for that Realtime session; late `session.updated` events must not revive it.

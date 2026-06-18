@@ -35,6 +35,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct ControlPanelView: View {
     @ObservedObject var controller: ApplicationController
 
+    private var controlsLocked: Bool {
+        controller.runState == .connecting ||
+            controller.runState == .listening ||
+            controller.runState == .stopping
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("LiveOverlayTranslator")
@@ -46,6 +52,7 @@ struct ControlPanelView: View {
                 }
             }
             .pickerStyle(.segmented)
+            .disabled(controlsLocked)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Backend WebSocket URL")
@@ -53,7 +60,7 @@ struct ControlPanelView: View {
                     .foregroundStyle(.secondary)
                 TextField("ws://127.0.0.1:8787/ws", text: $controller.backendURLString)
                     .textFieldStyle(.roundedBorder)
-                    .disabled(controller.mode == .localMock)
+                    .disabled(controller.mode == .localMock || controlsLocked)
             }
 
             HStack {
@@ -71,14 +78,14 @@ struct ControlPanelView: View {
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(controller.runState == .connecting || controller.runState == .listening)
+                .disabled(controlsLocked)
 
                 Button("Stop Listening") {
                     Task {
                         await controller.stopListening()
                     }
                 }
-                .disabled(controller.runState == .idle)
+                .disabled(controller.runState == .idle || controller.runState == .stopping)
 
                 Spacer()
 

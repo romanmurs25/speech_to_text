@@ -51,7 +51,7 @@ npm run build
 Verified in this workspace on 2026-06-18:
 
 - `npm run typecheck` passed.
-- `npm test` passed: 9 files, 30 tests.
+- `npm test` passed: 10 files, 37 tests.
 - `npm run build` passed.
 
 ## macOS Setup
@@ -66,7 +66,7 @@ swift test
 
 Open `macos/LiveOverlayTranslator/LiveOverlayTranslator.xcodeproj` in full Xcode for the native app target. Minimum macOS version is 14.
 
-In this workspace, Swift/Xcode validation is currently unverified because only Command Line Tools are selected and `xcodebuild` requires full Xcode. `swift build` also fails before compiling project code because the installed Command Line Tools SDK/compiler do not match.
+In this workspace on 2026-06-18, `swift build` passed with SwiftPM module caches redirected to `/private/tmp`. `swift test` is blocked because the active Command Line Tools toolchain does not provide the Swift `Testing` module, and `xcodebuild` is blocked because the active developer directory is `/Library/Developer/CommandLineTools` rather than full Xcode.
 
 ## Flow A: Local Mock
 
@@ -74,7 +74,7 @@ In this workspace, Swift/Xcode validation is currently unverified because only C
 2. Open the control window.
 3. Select `Local Mock`.
 4. Click `Start Listening`.
-5. Verify the overlay visibly shows provisional text, finalized transcript, pending translation, Russian/English translations, and suggested replies.
+5. Verify the overlay visibly shows provisional text, finalized transcript, pending translation, Russian/English translations, and empty suggested replies for the microphone/local mock.
 
 Local Mock does not connect to the backend, does not request microphone permission, and does not require an API key.
 
@@ -139,7 +139,8 @@ For production deployment, use WSS for the backend WebSocket. Plain `ws://127.0.
 - Incremental PCM S16LE mono 24 kHz frames, default 100 ms per frame.
 - Swift protocol support for `session_state`, transcript messages, overlay result, `recoverable_error`, and `fatal_error`.
 - Backend Realtime readiness queue for append/commit before `session.updated`.
-- Backend rejection of overlapping active utterances for P0 single-source safety.
+- Backend `utterance_cancel` support, OpenAI input-buffer clear, and fail-closed handling for ambiguous overlapping utterances.
+- Backend Realtime readiness queue byte/event overflow as a terminal Realtime-session failure.
 - Translation failure preserves completed speech in future dialogue context.
 
 ## Not Ready
