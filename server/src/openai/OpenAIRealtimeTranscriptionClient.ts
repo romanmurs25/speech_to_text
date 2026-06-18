@@ -11,10 +11,12 @@ export interface RealtimeTranscriptionClient {
 export interface RealtimeTranscriptionClientOptions {
   apiKey: string;
   model: string;
+  delay: string;
   source: Source;
   languageHint: string | null;
   onEvent: (event: OpenAIRealtimeEvent) => void;
   onError: (error: Error) => void;
+  onDisconnect: () => void;
 }
 
 export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionClient {
@@ -31,6 +33,7 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
     this.socket.on("open", () => this.configureSession());
     this.socket.on("message", (data) => this.handleMessage(data));
     this.socket.on("error", (error) => options.onError(error));
+    this.socket.on("close", () => options.onDisconnect());
   }
 
   appendAudio(pcm: Buffer): void {
@@ -51,7 +54,7 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
   private configureSession(): void {
     const transcription: Record<string, unknown> = {
       model: this.options.model,
-      delay: "low"
+      delay: this.options.delay
     };
     if (this.options.languageHint) {
       transcription.language = this.options.languageHint;

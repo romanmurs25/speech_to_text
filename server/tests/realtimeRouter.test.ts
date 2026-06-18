@@ -56,4 +56,25 @@ describe("RealtimeEventRouter", () => {
       })
     ).toBeNull();
   });
+
+  it("ignores empty completed transcripts", () => {
+    const store = new UtteranceCorrelationStore();
+    store.enqueue({
+      clientUtteranceId: "client-a",
+      sequence: 4,
+      source: "systemAudio",
+      speaker: "remote",
+      startedAtMs: 100
+    });
+    store.markCommitted("item-a");
+    const router = new RealtimeEventRouter(store);
+
+    expect(
+      router.route({
+        type: "conversation.item.input_audio_transcription.completed",
+        item_id: "item-a",
+        transcript: "   "
+      })
+    ).toBeNull();
+  });
 });

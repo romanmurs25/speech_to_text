@@ -54,6 +54,10 @@ export class UtteranceCorrelationStore {
     return this.byItemId.get(openAIItemId);
   }
 
+  getByClientUtteranceId(clientUtteranceId: string): PendingUtterance | undefined {
+    return this.byClientUtteranceId.get(clientUtteranceId);
+  }
+
   complete(openAIItemId: string, transcript: string): CorrelatedUtterance | null {
     const utterance = this.byItemId.get(openAIItemId);
     if (!utterance || utterance.completed) {

@@ -9,10 +9,11 @@ import { MockOpenAIResponsesClient } from "./openai/MockOpenAIResponsesClient.js
 import { OpenAIResponsesClient } from "./openai/OpenAIResponsesClient.js";
 import { OpenAIRealtimeTranscriptionClient } from "./openai/OpenAIRealtimeTranscriptionClient.js";
 import { ClientSessionManager } from "./ws/ClientSessionManager.js";
-import { rawDataByteLength } from "./ws/rawData.js";
-
-const MAX_JSON_BYTES = 64 * 1024;
-const MAX_AUDIO_BYTES = 256 * 1024;
+import {
+  MAX_AUDIO_FRAME_BYTES,
+  isOversizedAudioFrame,
+  isOversizedControlMessage
+} from "./ws/messageLimits.js";
 
 export async function createApp(config: ServerConfig = loadConfig()) {
   const logger = createLogger(config.logLevel);
@@ -36,7 +37,7 @@ export async function createApp(config: ServerConfig = loadConfig()) {
           model: config.openAITextModel
         });
 
-  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_AUDIO_BYTES });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_AUDIO_FRAME_BYTES });
 
   app.server.on("upgrade", (request, socket, head) => {
     if (request.url !== "/ws") {
@@ -61,6 +62,7 @@ export async function createApp(config: ServerConfig = loadConfig()) {
         return new OpenAIRealtimeTranscriptionClient({
           apiKey: config.openAIApiKey,
           model: config.openAIRealtimeModel,
+          delay: config.openAIRealtimeDelay,
           source: message.source,
           languageHint: message.language_hint,
           onEvent: (event) => {
@@ -75,6 +77,9 @@ export async function createApp(config: ServerConfig = loadConfig()) {
                 message: "Transcription is temporarily unavailable."
               })
             );
+          },
+          onDisconnect: () => {
+            manager.handleRealtimeDisconnect(message.source);
           }
         });
       }
@@ -82,7 +87,7 @@ export async function createApp(config: ServerConfig = loadConfig()) {
 
     ws.on("message", (data, isBinary) => {
       if (isBinary) {
-        if (rawDataByteLength(data) > MAX_AUDIO_BYTES) {
+        if (isOversizedAudioFrame(data)) {
           ws.send(
             JSON.stringify({
               type: "recoverable_error",
@@ -96,7 +101,7 @@ export async function createApp(config: ServerConfig = loadConfig()) {
         return;
       }
 
-      if (rawDataByteLength(data) > MAX_JSON_BYTES) {
+      if (isOversizedControlMessage(data)) {
         ws.send(
           JSON.stringify({
             type: "fatal_error",

@@ -31,6 +31,7 @@ export class ClientSessionManager {
   private readonly router = new RealtimeEventRouter(this.correlation);
   private readonly realtimeClients = new Map<string, RealtimeTranscriptionClient>();
   private activeClientUtteranceId: string | null = null;
+  private activeSource: string | null = null;
 
   constructor(private readonly options: ClientSessionManagerOptions) {
     this.overlayResponses = new OverlayResponseService(options.overlayResponseClient);
@@ -55,6 +56,7 @@ export class ClientSessionManager {
 
       case "utterance_start":
         this.activeClientUtteranceId = message.client_utterance_id;
+        this.activeSource = message.source;
         this.correlation.enqueue({
           clientUtteranceId: message.client_utterance_id,
           sequence: message.sequence,
@@ -69,11 +71,13 @@ export class ClientSessionManager {
         if (this.options.mockMode) {
           await this.emitMockCompletion(message.client_utterance_id, message.sequence, message.ended_at_ms);
         } else {
-          for (const client of this.realtimeClients.values()) {
-            client.commit();
+          const source = this.correlation.getByClientUtteranceId(message.client_utterance_id)?.source;
+          if (source) {
+            this.realtimeClients.get(source)?.commit();
           }
         }
         this.activeClientUtteranceId = null;
+        this.activeSource = null;
         return;
 
       case "stop_stream":
@@ -88,10 +92,11 @@ export class ClientSessionManager {
       return;
     }
 
-    const buffer = rawDataToBuffer(data);
-    for (const client of this.realtimeClients.values()) {
-      client.appendAudio(buffer);
+    if (!this.activeSource) {
+      return;
     }
+    const buffer = rawDataToBuffer(data);
+    this.realtimeClients.get(this.activeSource)?.appendAudio(buffer);
   }
 
   async handleRealtimeEvent(event: Parameters<RealtimeEventRouter["route"]>[0]): Promise<void> {
@@ -104,6 +109,21 @@ export class ClientSessionManager {
     if (routed.type === "transcript_completed") {
       await this.createOverlayResult(routed.openai_item_id, routed.transcript);
     }
+  }
+
+  handleRealtimeDisconnect(source?: string): void {
+    if (source) {
+      this.realtimeClients.delete(source);
+    } else {
+      this.realtimeClients.clear();
+    }
+    this.activeClientUtteranceId = null;
+    this.activeSource = null;
+    this.options.send({
+      type: "recoverable_error",
+      code: "openai_realtime_disconnected",
+      message: "Transcription disconnected. The interrupted utterance was not replayed automatically."
+    });
   }
 
   close(): void {

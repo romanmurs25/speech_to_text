@@ -26,9 +26,11 @@ Mock mode works without an API key when `MOCK_OPENAI=true`.
 For real OpenAI API calls, set:
 
 ```bash
-OPENAI_API_KEY=sk-...
+OPENAI_API_KEY=
 MOCK_OPENAI=false
 ```
+
+Fill `OPENAI_API_KEY` only in your local backend environment, never in source control.
 
 The default text model is `gpt-5.4-mini` and can be changed with `OPENAI_TEXT_MODEL`.
 

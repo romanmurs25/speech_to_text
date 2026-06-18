@@ -5,6 +5,7 @@ export interface ServerConfig {
   openAIApiKey: string | undefined;
   openAITextModel: string;
   openAIRealtimeModel: string;
+  openAIRealtimeDelay: string;
   logLevel: string;
 }
 
@@ -16,6 +17,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     openAIApiKey: env.OPENAI_API_KEY,
     openAITextModel: env.OPENAI_TEXT_MODEL ?? "gpt-5.4-mini",
     openAIRealtimeModel: env.OPENAI_REALTIME_MODEL ?? "gpt-realtime-whisper",
+    openAIRealtimeDelay: env.OPENAI_REALTIME_DELAY ?? "low",
     logLevel: env.LOG_LEVEL ?? "info"
   };
 }

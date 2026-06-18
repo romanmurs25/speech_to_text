@@ -63,4 +63,33 @@ describe("overlay response service", () => {
       publicMessage: "The model refused to transform this utterance."
     });
   });
+
+  it("normalizes Responses API timeout failures for the overlay", async () => {
+    const client = {
+      createOverlayResult: vi.fn().mockRejectedValue(Object.assign(new Error("timeout"), { code: "ETIMEDOUT" }))
+    };
+    const service = new OverlayResponseService(client);
+
+    await expect(service.translate(envelope)).rejects.toMatchObject({
+      code: "translation_failed",
+      publicMessage: "Translation is temporarily unavailable."
+    });
+  });
+
+  it("shares an in-flight Responses request for duplicate retries", async () => {
+    let resolveResult: (value: OverlayResult) => void = () => {};
+    const pending = new Promise<OverlayResult>((resolve) => {
+      resolveResult = resolve;
+    });
+    const client = { createOverlayResult: vi.fn().mockReturnValue(pending) };
+    const service = new OverlayResponseService(client);
+
+    const first = service.translate(envelope);
+    const second = service.translate(envelope);
+    resolveResult(result);
+
+    await expect(first).resolves.toEqual(result);
+    await expect(second).resolves.toEqual(result);
+    expect(client.createOverlayResult).toHaveBeenCalledTimes(1);
+  });
 });
