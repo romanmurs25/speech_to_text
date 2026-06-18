@@ -80,7 +80,7 @@ Binary frames contain raw PCM S16LE audio for the currently active microphone ut
 }
 ```
 
-`utterance_commit` is accepted once for an active utterance. Duplicate commits for the same utterance are ignored after the first accepted commit. A commit after cancellation produces `utterance_not_committable` and does not call OpenAI commit or Responses.
+`utterance_commit` is accepted once for an active utterance. The `sequence` must match the accepted `utterance_start`; an identical duplicate commit is idempotent; a duplicate with a different `sequence` or materially different `ended_at_ms` is rejected and never calls OpenAI commit. A commit after cancellation or abandonment produces `utterance_not_committable` and does not call OpenAI commit or Responses.
 
 ### utterance_cancel
 
@@ -112,7 +112,7 @@ Cancellation is valid only before an utterance has been committed. The backend c
 }
 ```
 
-`stop_stream` cancels uncommitted microphone utterances as `user_interrupted`, clears the OpenAI buffer when present, and closes the Realtime session. The macOS client also sends `utterance_cancel` for a user stop before disconnect cleanup.
+`stop_stream` cancels active uncommitted microphone utterances as `user_interrupted`, clears the OpenAI buffer only when `stop_stream` itself found cancellable audio that was not already cancelled, and closes the Realtime session. The macOS client sends `utterance_cancel` for a user stop before `stop_stream`, so the normal stop sequence produces at most one OpenAI clear and one Realtime close.
 
 ## Server Messages
 
@@ -194,8 +194,8 @@ Only this message type may trigger a Responses API request.
 ```json
 {
   "type": "fatal_error",
-  "code": "ambiguous_audio_routing",
-  "message": "The audio stream entered an ambiguous utterance state."
+  "code": "realtime_session_failed",
+  "message": "The transcription session ended and must be restarted."
 }
 ```
 
@@ -235,7 +235,8 @@ The backend deduplicates by `session_id` plus `utterance_id`.
 
 ## Ordering Rules
 
-- An utterance lifecycle is `active -> commitRequested -> correlated -> completed`; cancellation moves uncommitted utterances to `cancelled`.
+- An utterance lifecycle is `active -> commitRequested -> correlated -> completed`; cancellation moves only pre-commit active utterances to `cancelled`.
+- A session failure after commit has been requested moves unfinished records to `abandoned`. Abandoned utterances are not replayed, cannot later correlate or complete, and are not described as successfully cancelled.
 - A cancelled utterance cannot later be committed, correlated, completed, translated, or replayed.
 - Deltas update only their matching `client_utterance_id`.
 - Final transcripts replace provisional text for the same utterance.
@@ -244,3 +245,4 @@ The backend deduplicates by `session_id` plus `utterance_id`.
 - Completion events may arrive out of order and must be reconciled by OpenAI item ID.
 - OpenAI `input_audio_buffer.cleared` is accepted as an internal acknowledgement and does not produce an app-visible server message.
 - Realtime readiness queues are bounded by event count and byte size. Queue overflow is terminal for that Realtime session; late `session.updated` events must not revive it.
+- Realtime socket send failures and malformed Realtime events are terminal for the current session.

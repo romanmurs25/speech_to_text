@@ -158,7 +158,10 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
 
       this.options.onEvent(event);
     } catch (error) {
-      this.options.onError(error instanceof Error ? error : new Error(String(error)));
+      this.failTerminal(
+        "openai_realtime_malformed_event",
+        "Malformed Realtime message."
+      );
     }
   }
 
@@ -193,26 +196,38 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
   }
 
   private flushQueuedEvents(): void {
-    const events = this.queuedEvents.splice(0);
-    this.queuedAudioBytes = 0;
-    for (const { event } of events) {
-      this.sendImmediately(event);
-      if (this.state === "failed") {
+    while (this.queuedEvents.length > 0 && this.state === "ready") {
+      const queued = this.queuedEvents[0];
+      if (!queued) {
         return;
       }
+      if (!this.sendImmediately(queued.event)) {
+        return;
+      }
+      this.queuedEvents.shift();
+      this.queuedAudioBytes -= queued.audioBytes;
     }
   }
 
-  private sendImmediately(event: unknown): void {
+  private sendImmediately(event: unknown): boolean {
     if (this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify(event));
-      return;
+      try {
+        this.socket.send(JSON.stringify(event));
+        return true;
+      } catch {
+        this.failTerminal("openai_realtime_send_failed", "Realtime socket send failed.");
+        return false;
+      }
     }
 
     this.failTerminal("openai_realtime_send_failed", "Realtime socket is not open.");
+    return false;
   }
 
   private handleClose(): void {
+    if (this.state === "disconnected") {
+      return;
+    }
     const wasIntentional = this.state === "intentionallyClosing";
     const wasFailed = this.state === "failed";
     this.state = "disconnected";

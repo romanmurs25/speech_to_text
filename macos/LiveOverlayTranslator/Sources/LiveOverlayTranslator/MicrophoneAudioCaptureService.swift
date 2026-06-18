@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 import LiveOverlayTranslatorCore
 
-final class MicrophoneAudioCaptureService: AudioCaptureService, @unchecked Sendable {
+final class MicrophoneAudioCaptureService: AudioCaptureService, MicrophoneCaptureServiceProtocol, @unchecked Sendable {
     let source: AudioSource = .microphone
     private let engine = AVAudioEngine()
     private let resampler: PCMResampler
@@ -13,8 +13,26 @@ final class MicrophoneAudioCaptureService: AudioCaptureService, @unchecked Senda
     }
 
     func start(onChunk: @escaping @Sendable (AudioChunk) -> Void) async throws {
-        let granted = await AVCaptureDevice.requestAccess(for: .audio)
-        guard granted else { throw AudioCaptureError.microphonePermissionDenied }
+        try await requestPermission()
+        try startCapture(onChunk: onChunk)
+    }
+
+    func requestPermission() async throws {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            return
+        case .notDetermined:
+            let granted = await AVCaptureDevice.requestAccess(for: .audio)
+            guard granted else { throw AudioCaptureError.microphonePermissionDenied }
+        case .denied, .restricted:
+            throw AudioCaptureError.microphonePermissionDenied
+        @unknown default:
+            throw AudioCaptureError.microphonePermissionDenied
+        }
+    }
+
+    func startCapture(onChunk: @escaping @Sendable (AudioChunk) -> Void) throws {
+        stop()
         self.onChunk = onChunk
 
         let input = engine.inputNode
@@ -41,7 +59,14 @@ final class MicrophoneAudioCaptureService: AudioCaptureService, @unchecked Senda
             onChunk(AudioChunk(source: .microphone, pcmSamples: pcm, timestampMs: timestampMs))
         }
 
-        try engine.start()
+        do {
+            try engine.start()
+        } catch {
+            input.removeTap(onBus: 0)
+            engine.stop()
+            self.onChunk = nil
+            throw error
+        }
     }
 
     func stop() {

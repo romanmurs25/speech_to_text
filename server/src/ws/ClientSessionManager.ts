@@ -21,7 +21,7 @@ import { rawDataToBuffer } from "./rawData.js";
 export interface ClientSessionManagerOptions {
   mockMode: boolean;
   overlayResponseClient: OverlayResponseClient;
-  send: (message: ServerMessage) => void;
+  send: (message: ServerMessage) => boolean | void;
   realtimeClientFactory?: (source: ClientControlMessage & { type: "start_stream" }) => RealtimeTranscriptionClient;
   terminate?: () => void;
 }
@@ -36,6 +36,7 @@ export class ClientSessionManager {
   private activeClientUtteranceId: string | null = null;
   private activeSource: Source | null = null;
   private terminated = false;
+  private closed = false;
   private readonly failedRealtimeSources = new Set<Source>();
 
   constructor(private readonly options: ClientSessionManagerOptions) {
@@ -50,7 +51,7 @@ export class ClientSessionManager {
     switch (message.type) {
       case "hello":
         this.sessionId = message.session_id;
-        this.options.send({
+        this.send({
           type: "session_state",
           status: "ready",
           session_id: message.session_id
@@ -59,7 +60,7 @@ export class ClientSessionManager {
 
       case "start_stream":
         if (message.source !== "microphone") {
-          this.options.send({
+          this.send({
             type: "recoverable_error",
             code: "source_unavailable",
             message: "System audio capture is not available in the P0 microphone build."
@@ -75,7 +76,7 @@ export class ClientSessionManager {
 
       case "utterance_start":
         if (message.source !== "microphone") {
-          this.options.send({
+          this.send({
             type: "recoverable_error",
             code: "source_unavailable",
             message: "System audio capture is not available in the P0 microphone build.",
@@ -113,7 +114,7 @@ export class ClientSessionManager {
           this.activeClientUtteranceId &&
           this.activeClientUtteranceId !== message.client_utterance_id
         ) {
-          this.options.send({
+          this.send({
             type: "recoverable_error",
             code: "utterance_not_active",
             message: "The committed utterance is not the active microphone utterance.",
@@ -122,9 +123,13 @@ export class ClientSessionManager {
           return;
         }
 
-        const commit = this.correlation.requestCommit(message.client_utterance_id, message.ended_at_ms);
+        const commit = this.correlation.requestCommit(
+          message.client_utterance_id,
+          message.sequence,
+          message.ended_at_ms
+        );
         if (!commit.ok) {
-          this.options.send({
+          this.send({
             type: "recoverable_error",
             code: commit.code === "not_found" ? "unknown_utterance" : "utterance_not_committable",
             message: "The utterance is not active and cannot be committed.",
@@ -166,7 +171,7 @@ export class ClientSessionManager {
           if (cancel.code === "not_found") {
             return;
           }
-          this.options.send({
+          this.send({
             type: "recoverable_error",
             code: "utterance_not_cancellable",
             message: "The utterance could not be cancelled safely.",
@@ -186,13 +191,16 @@ export class ClientSessionManager {
       }
 
       case "stop_stream":
-        this.correlation.clearUncommittedForSource(message.source, "user_interrupted");
+        const stopped = this.correlation.clearUnfinishedForSource(message.source, "user_interrupted");
         if (this.activeSource === message.source) {
           this.activeClientUtteranceId = null;
           this.activeSource = null;
         }
-        this.realtimeClients.get(message.source)?.clear();
-        this.realtimeClients.get(message.source)?.close();
+        const client = this.realtimeClients.get(message.source);
+        if (client && stopped.cancelled.length > 0) {
+          client.clear();
+        }
+        client?.close();
         this.realtimeClients.delete(message.source);
         return;
     }
@@ -207,16 +215,27 @@ export class ClientSessionManager {
       return;
     }
     const buffer = rawDataToBuffer(data);
-    this.realtimeClients.get(this.activeSource)?.appendAudio(buffer);
+    try {
+      this.realtimeClients.get(this.activeSource)?.appendAudio(buffer);
+    } catch {
+      this.sendFatalAndTerminate(
+        "realtime_session_failed",
+        "The transcription session ended and must be restarted."
+      );
+    }
   }
 
   async handleRealtimeEvent(event: Parameters<RealtimeEventRouter["route"]>[0]): Promise<void> {
+    if (this.terminated) {
+      return;
+    }
+
     const routed = this.router.route(event);
     if (!routed) {
       return;
     }
 
-    this.options.send(routed);
+    this.send(routed);
     if (routed.type === "transcript_completed") {
       await this.createOverlayResult(routed.openai_item_id, routed.transcript);
     }
@@ -232,33 +251,47 @@ export class ClientSessionManager {
   }
 
   handleRealtimeFailure(source: Source, failure: RealtimeTerminalFailure): void {
+    const client = this.realtimeClients.get(source);
     const hadClient = this.realtimeClients.delete(source);
     const interruptedUtterance =
       this.activeSource === source ? this.activeClientUtteranceId ?? undefined : undefined;
-    const cancelled = this.correlation.clearUncommittedForSource(source, "capture_interrupted");
-    if (!hadClient && !interruptedUtterance && cancelled.length === 0) {
+    const cleared = this.correlation.clearUnfinishedForSource(source, "capture_interrupted");
+    if (!hadClient && !interruptedUtterance && cleared.cancelled.length === 0 && cleared.abandoned.length === 0) {
       if (this.failedRealtimeSources.has(source)) {
         return;
       }
     }
     this.failedRealtimeSources.add(source);
+    client?.close();
 
     if (this.activeSource === source) {
       this.activeClientUtteranceId = null;
       this.activeSource = null;
     }
-    this.options.send({
-      type: "recoverable_error",
-      code: failure.code,
-      message: failure.message,
-      client_utterance_id: interruptedUtterance
-    });
+    if (interruptedUtterance) {
+      this.send({
+        type: "recoverable_error",
+        code: failure.code,
+        message: failure.message,
+        client_utterance_id: interruptedUtterance
+      });
+    }
+    this.sendFatalAndTerminate(
+      "realtime_session_failed",
+      "The transcription session ended and must be restarted."
+    );
   }
 
   close(): void {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
     for (const [source, client] of this.realtimeClients) {
-      this.correlation.clearUncommittedForSource(source, "application_shutdown");
-      client.clear();
+      const cleared = this.correlation.clearUnfinishedForSource(source, "application_shutdown");
+      if (cleared.cancelled.length > 0) {
+        client.clear();
+      }
       client.close();
     }
     this.realtimeClients.clear();
@@ -268,8 +301,13 @@ export class ClientSessionManager {
 
   private failAmbiguousAudioRouting(): void {
     if (this.activeSource) {
-      this.realtimeClients.get(this.activeSource)?.clear();
-      this.correlation.clearUncommittedForSource(this.activeSource, "capture_interrupted");
+      const client = this.realtimeClients.get(this.activeSource);
+      const cleared = this.correlation.clearUnfinishedForSource(this.activeSource, "capture_interrupted");
+      if (cleared.cancelled.length > 0) {
+        client?.clear();
+      }
+      client?.close();
+      this.realtimeClients.delete(this.activeSource);
     }
     this.activeClientUtteranceId = null;
     this.activeSource = null;
@@ -284,8 +322,12 @@ export class ClientSessionManager {
       return;
     }
     this.terminated = true;
-    this.options.send({ type: "fatal_error", code, message });
+    this.send({ type: "fatal_error", code, message });
     this.options.terminate?.();
+  }
+
+  private send(message: ServerMessage): boolean {
+    return this.options.send(message) !== false;
   }
 
   private async emitMockCompletion(
@@ -303,7 +345,7 @@ export class ClientSessionManager {
       delta: "Could you send"
     });
     if (delta) {
-      this.options.send(delta);
+      this.send(delta);
     }
 
     const completed = this.router.route({
@@ -312,7 +354,7 @@ export class ClientSessionManager {
       transcript
     });
     if (completed) {
-      this.options.send(completed);
+      this.send(completed);
       await this.createOverlayResult(itemId, transcript, clientUtteranceId, sequence, endedAtMs);
     }
   }
@@ -325,7 +367,7 @@ export class ClientSessionManager {
     fallbackEndedAtMs?: number
   ): Promise<void> {
     const correlated = this.correlation.getByOpenAIItemId(openAIItemId);
-    if (!correlated || !this.sessionId) {
+    if (this.terminated || !correlated || !this.sessionId) {
       return;
     }
 
@@ -351,6 +393,9 @@ export class ClientSessionManager {
 
     try {
       const result = await this.overlayResponses.translate(envelope);
+      if (this.terminated) {
+        return;
+      }
       if (result.reply_needed) {
         this.dialogue.addSuggestedReply({
           suggestedReplyRu: result.suggested_reply_ru,
@@ -358,14 +403,17 @@ export class ClientSessionManager {
           sequence: envelope.sequence
         });
       }
-      this.options.send({
+      this.send({
         type: "overlay_result",
         client_utterance_id: envelope.client_utterance_id,
         sequence: envelope.sequence,
         result
       });
     } catch (error) {
-      this.options.send({
+      if (this.terminated) {
+        return;
+      }
+      this.send({
         type: "recoverable_error",
         code: isPublicServiceError(error) ? error.code : "translation_failed",
         message: isPublicServiceError(error)

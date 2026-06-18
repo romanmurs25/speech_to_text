@@ -48,10 +48,10 @@ npm test
 npm run build
 ```
 
-Verified in this workspace on 2026-06-18:
+Verified in this workspace on 2026-06-19:
 
-- `npm run typecheck` passed.
-- `npm test` passed: 10 files, 37 tests.
+- `npm run typecheck` passed for source and test TypeScript.
+- `npm test` passed: 11 files, 51 tests.
 - `npm run build` passed.
 
 ## macOS Setup
@@ -66,7 +66,7 @@ swift test
 
 Open `macos/LiveOverlayTranslator/LiveOverlayTranslator.xcodeproj` in full Xcode for the native app target. Minimum macOS version is 14.
 
-In this workspace on 2026-06-18, `swift build` passed with SwiftPM module caches redirected to `/private/tmp`. `swift test` is blocked because the active Command Line Tools toolchain does not provide the Swift `Testing` module, and `xcodebuild` is blocked because the active developer directory is `/Library/Developer/CommandLineTools` rather than full Xcode.
+In this workspace on 2026-06-19, `swift build` passed with SwiftPM module caches redirected to `/private/tmp`. `swift test` is blocked because the active Command Line Tools toolchain does not provide the Swift `Testing` module, and `xcodebuild` is blocked because the active developer directory is `/Library/Developer/CommandLineTools` rather than full Xcode.
 
 ## Flow A: Local Mock
 
@@ -138,9 +138,12 @@ For production deployment, use WSS for the backend WebSocket. Plain `ws://127.0.
 - Local endpoint detection with pre-roll, phrase-ending silence, minimum duration, and maximum utterance duration.
 - Incremental PCM S16LE mono 24 kHz frames, default 100 ms per frame.
 - Swift protocol support for `session_state`, transcript messages, overlay result, `recoverable_error`, and `fatal_error`.
+- Generation-bound macOS Backend microphone session ownership with one resource set per active session.
+- Stop during startup or microphone permission invalidates the session before capture can start.
 - Backend Realtime readiness queue for append/commit before `session.updated`.
 - Backend `utterance_cancel` support, OpenAI input-buffer clear, and fail-closed handling for ambiguous overlapping utterances.
 - Backend Realtime readiness queue byte/event overflow as a terminal Realtime-session failure.
+- Backend terminal Realtime failure closes the client WebSocket; the user must explicitly start a new session.
 - Translation failure preserves completed speech in future dialogue context.
 
 ## Not Ready

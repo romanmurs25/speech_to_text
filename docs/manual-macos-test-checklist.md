@@ -92,11 +92,12 @@ Expected result: real mode refuses to listen without a backend-only OpenAI API k
 
 1. Start Backend microphone mode against a real or instrumented backend.
 2. Force a Realtime socket close, Realtime error, or readiness queue overflow.
-3. Confirm only one recoverable error is shown.
+3. Confirm the backend emits a terminal `fatal_error` for the current session.
 4. Confirm the interrupted utterance is not replayed, committed, or translated.
-5. Confirm a new user-started session can reconnect.
+5. Confirm microphone capture stops and the client WebSocket closes.
+6. Confirm a new session starts only after the user explicitly clicks `Start Listening` again.
 
-Expected result: Realtime failures are terminal for the current Realtime client and late readiness events do not revive it.
+Expected result: Realtime failures are terminal for the current session and late readiness events do not revive it.
 
 ## 4C. Ambiguous Audio Routing Negative Test
 
@@ -104,6 +105,74 @@ Expected result: Realtime failures are terminal for the current Realtime client 
 2. Send binary audio after the second start.
 
 Expected result: backend emits fatal `ambiguous_audio_routing`, clears the input buffer when present, terminates the WebSocket, and ignores following audio.
+
+## 4D. Stop During Permission Prompt
+
+1. Select `Backend` mode.
+2. Click `Start Listening`.
+3. While the macOS microphone prompt is open, click `Stop Listening` if possible or trigger session cancellation through a test harness.
+4. Grant permission afterward.
+5. Verify microphone capture does not start.
+6. Verify the UI remains stopped.
+
+Expected result: Stop invalidates the startup session before the input tap is installed.
+
+## 4E. Backend Failure During Permission Prompt
+
+1. Start `Backend` mode.
+2. Leave the microphone permission prompt open.
+3. Stop the backend.
+4. Grant microphone permission.
+5. Verify the app does not install a tap or enter listening.
+
+Expected result: backend failure invalidates the session, cleanup completes, and stale permission completion cannot start capture.
+
+## 4F. Realtime Terminal Failure Cleanup
+
+1. Begin listening.
+2. Force the backend Realtime connection to fail.
+3. Verify the microphone indicator stops.
+4. Verify the AVAudioEngine tap is removed.
+5. Verify the app enters failed/interrupted.
+6. Verify Start becomes available only after cleanup.
+7. Verify a new explicitly started session works.
+
+Expected result: the exact failed session context is cleaned up and no stale receive or processing task updates a later session.
+
+## 4G. Audio Pipeline Overflow
+
+1. Use a development setting or test harness with an intentionally tiny audio pipe.
+2. Cause overflow.
+3. Verify one visible overflow error.
+4. Verify the current utterance is cancelled.
+5. Verify no final transcript appears.
+6. Verify no commit appears in backend diagnostics.
+7. Verify microphone stops.
+8. Verify the user must explicitly restart.
+
+Expected result: overflow invalidates synchronously, no `utterance_commit` is sent after overflow, and cleanup stops capture.
+
+## 4H. Rapid Start/Stop Ownership
+
+Run 20 cycles:
+
+1. Click `Start Listening`.
+2. Click `Stop Listening` immediately.
+3. Start again after cleanup.
+
+Expected result: one AVAudioEngine tap at a time, one WebSocket at a time, no stale callbacks, no increasing duplicate messages, and no session A cleanup affecting session B.
+
+## 4I. Stop During Speech
+
+1. Begin a phrase.
+2. Click `Stop Listening` before endpoint completion.
+3. Verify one `utterance_cancel`.
+4. Verify one `input_audio_buffer.clear`.
+5. Verify zero commit.
+6. Verify one Realtime close.
+7. Verify no late transcript.
+
+Expected result: normal user stop is idempotent and does not double-clear Realtime input.
 
 ## 5. Overlay Behavior
 
@@ -149,7 +218,7 @@ Expected result: windows hide immediately. Verify shortcut reliability while ano
 3. Wake Mac.
 4. Confirm overlay remains responsive.
 5. Repeat with real microphone transcription running.
-6. Confirm uncertain audio is not replayed automatically after reconnect.
+6. Confirm uncertain audio is not replayed automatically after the user starts a new session.
 
 Expected result: interrupted utterances are marked interrupted or recoverable; no duplicate transcription request is created.
 

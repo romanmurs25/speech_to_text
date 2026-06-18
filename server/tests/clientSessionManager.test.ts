@@ -10,7 +10,9 @@ describe("ClientSessionManager", () => {
     const manager = new ClientSessionManager({
       mockMode: true,
       overlayResponseClient: new MockOpenAIResponsesClient(),
-      send: (message) => messages.push(message)
+      send: (message) => {
+        messages.push(message);
+      }
     });
 
     manager.handleControl({
@@ -67,7 +69,9 @@ describe("ClientSessionManager", () => {
     const manager = new ClientSessionManager({
       mockMode: true,
       overlayResponseClient: new MockOpenAIResponsesClient(),
-      send: (message) => messages.push(message)
+      send: (message) => {
+        messages.push(message);
+      }
     });
 
     manager.handleControl({
@@ -88,23 +92,30 @@ describe("ClientSessionManager", () => {
     expect(messages.some((message) => (message as { type: string }).type === "overlay_result")).toBe(false);
   });
 
-  it("surfaces OpenAI Realtime disconnects without replaying committed audio", () => {
+  it("terminates on OpenAI Realtime disconnects without replaying committed audio", () => {
     const messages: unknown[] = [];
+    let terminated = 0;
     const manager = new ClientSessionManager({
       mockMode: false,
       overlayResponseClient: new MockOpenAIResponsesClient(),
-      send: (message) => messages.push(message)
+      send: (message) => {
+        messages.push(message);
+      },
+      terminate: () => {
+        terminated += 1;
+      }
     });
 
     manager.handleRealtimeDisconnect("microphone");
 
     expect(messages).toEqual([
       {
-        type: "recoverable_error",
-        code: "openai_realtime_disconnected",
-        message: "Transcription disconnected. The interrupted utterance was not committed or replayed."
+        type: "fatal_error",
+        code: "realtime_session_failed",
+        message: "The transcription session ended and must be restarted."
       }
     ]);
+    expect(terminated).toBe(1);
   });
 
   it("routes audio and commit to the active microphone Realtime client", async () => {
@@ -151,7 +162,9 @@ describe("ClientSessionManager", () => {
     const manager = new ClientSessionManager({
       mockMode: false,
       overlayResponseClient: new MockOpenAIResponsesClient(),
-      send: (message) => messages.push(message),
+      send: (message) => {
+        messages.push(message);
+      },
       realtimeClientFactory: () => microphoneClient
     });
 
@@ -261,7 +274,9 @@ describe("ClientSessionManager", () => {
     const manager = new ClientSessionManager({
       mockMode: false,
       overlayResponseClient: new MockOpenAIResponsesClient(),
-      send: (message) => messages.push(message),
+      send: (message) => {
+        messages.push(message);
+      },
       realtimeClientFactory: () => microphoneClient,
       terminate: () => {
         terminated = true;
@@ -326,7 +341,9 @@ describe("ClientSessionManager", () => {
     const manager = new ClientSessionManager({
       mockMode: false,
       overlayResponseClient: new MockOpenAIResponsesClient(),
-      send: (message) => messages.push(message),
+      send: (message) => {
+        messages.push(message);
+      },
       realtimeClientFactory: () => microphoneClient
     });
 
@@ -362,12 +379,279 @@ describe("ClientSessionManager", () => {
     expect(microphoneClient.commits).toBe(0);
   });
 
+  it("does not double-clear for the real client cancel then stop then close sequence", async () => {
+    const microphoneClient = new RecordingRealtimeClient();
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: new MockOpenAIResponsesClient(),
+      send: () => {},
+      realtimeClientFactory: () => microphoneClient
+    });
+
+    await manager.handleControl({
+      type: "start_stream",
+      source: "microphone",
+      sample_rate: 24000,
+      channels: 1,
+      encoding: "pcm_s16le",
+      language_hint: null
+    });
+    await manager.handleControl({
+      type: "utterance_start",
+      client_utterance_id: "client-stop",
+      source: "microphone",
+      speaker: "local",
+      sequence: 1,
+      started_at_ms: 100
+    });
+    manager.handleAudio(Buffer.from([1, 2, 3, 4]));
+    await manager.handleControl({
+      type: "utterance_cancel",
+      client_utterance_id: "client-stop",
+      sequence: 1,
+      reason: "user_interrupted"
+    });
+    await manager.handleControl({
+      type: "stop_stream",
+      source: "microphone"
+    });
+    manager.close();
+
+    expect(microphoneClient.clears).toBe(1);
+    expect(microphoneClient.commits).toBe(0);
+    expect(microphoneClient.closes).toBe(1);
+  });
+
+  it("keeps repeated stop_stream idempotent when no active cancellable audio remains", async () => {
+    const microphoneClient = new RecordingRealtimeClient();
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: new MockOpenAIResponsesClient(),
+      send: () => {},
+      realtimeClientFactory: () => microphoneClient
+    });
+
+    await manager.handleControl({
+      type: "start_stream",
+      source: "microphone",
+      sample_rate: 24000,
+      channels: 1,
+      encoding: "pcm_s16le",
+      language_hint: null
+    });
+    await manager.handleControl({ type: "stop_stream", source: "microphone" });
+    await manager.handleControl({ type: "stop_stream", source: "microphone" });
+
+    expect(microphoneClient.clears).toBe(0);
+    expect(microphoneClient.closes).toBe(1);
+  });
+
+  it("rejects commit sequence mismatches before Realtime commit", async () => {
+    const messages: unknown[] = [];
+    const microphoneClient = new RecordingRealtimeClient();
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: new MockOpenAIResponsesClient(),
+      send: (message) => {
+        messages.push(message);
+      },
+      realtimeClientFactory: () => microphoneClient
+    });
+
+    await manager.handleControl({
+      type: "start_stream",
+      source: "microphone",
+      sample_rate: 24000,
+      channels: 1,
+      encoding: "pcm_s16le",
+      language_hint: null
+    });
+    await manager.handleControl({
+      type: "utterance_start",
+      client_utterance_id: "client-seq",
+      source: "microphone",
+      speaker: "local",
+      sequence: 7,
+      started_at_ms: 100
+    });
+    await manager.handleControl({
+      type: "utterance_commit",
+      client_utterance_id: "client-seq",
+      sequence: 8,
+      ended_at_ms: 200
+    });
+
+    expect(microphoneClient.commits).toBe(0);
+    expect(messages).toContainEqual({
+      type: "recoverable_error",
+      code: "utterance_not_committable",
+      message: "The utterance is not active and cannot be committed.",
+      client_utterance_id: "client-seq"
+    });
+  });
+
+  it("rejects duplicate commit with different ended_at_ms without a second Realtime commit", async () => {
+    const messages: unknown[] = [];
+    const microphoneClient = new RecordingRealtimeClient();
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: new MockOpenAIResponsesClient(),
+      send: (message) => {
+        messages.push(message);
+      },
+      realtimeClientFactory: () => microphoneClient
+    });
+
+    await manager.handleControl({
+      type: "start_stream",
+      source: "microphone",
+      sample_rate: 24000,
+      channels: 1,
+      encoding: "pcm_s16le",
+      language_hint: null
+    });
+    await manager.handleControl({
+      type: "utterance_start",
+      client_utterance_id: "client-dup-commit",
+      source: "microphone",
+      speaker: "local",
+      sequence: 2,
+      started_at_ms: 100
+    });
+    await manager.handleControl({
+      type: "utterance_commit",
+      client_utterance_id: "client-dup-commit",
+      sequence: 2,
+      ended_at_ms: 200
+    });
+    await manager.handleControl({
+      type: "utterance_commit",
+      client_utterance_id: "client-dup-commit",
+      sequence: 2,
+      ended_at_ms: 250
+    });
+
+    expect(microphoneClient.commits).toBe(1);
+    expect(messages).toContainEqual({
+      type: "recoverable_error",
+      code: "utterance_not_committable",
+      message: "The utterance is not active and cannot be committed.",
+      client_utterance_id: "client-dup-commit"
+    });
+  });
+
+  it("terminates the client session on terminal Realtime failure", async () => {
+    const messages: unknown[] = [];
+    const microphoneClient = new RecordingRealtimeClient();
+    let terminated = 0;
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: new MockOpenAIResponsesClient(),
+      send: (message) => {
+        messages.push(message);
+      },
+      realtimeClientFactory: () => microphoneClient,
+      terminate: () => {
+        terminated += 1;
+      }
+    });
+
+    await manager.handleControl({
+      type: "start_stream",
+      source: "microphone",
+      sample_rate: 24000,
+      channels: 1,
+      encoding: "pcm_s16le",
+      language_hint: null
+    });
+    await manager.handleControl({
+      type: "utterance_start",
+      client_utterance_id: "client-fail",
+      source: "microphone",
+      speaker: "local",
+      sequence: 1,
+      started_at_ms: 100
+    });
+    manager.handleRealtimeFailure("microphone", {
+      source: "microphone",
+      code: "openai_realtime_error",
+      message: "Realtime socket failed.",
+      interruptedUtterance: true
+    });
+    manager.handleAudio(Buffer.from([1, 2, 3, 4]));
+
+    expect(messages.at(-1)).toEqual({
+      type: "fatal_error",
+      code: "realtime_session_failed",
+      message: "The transcription session ended and must be restarted."
+    });
+    expect(terminated).toBe(1);
+    expect(microphoneClient.closes).toBe(1);
+    expect(microphoneClient.appendedBytes).toBe(0);
+  });
+
+  it("does not send overlay results when termination happens while Responses is in flight", async () => {
+    const messages: unknown[] = [];
+    const deferred = new DeferredOverlayResponse();
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: deferred,
+      send: (message) => {
+        messages.push(message);
+      },
+      terminate: () => {}
+    });
+
+    await manager.handleControl({
+      type: "hello",
+      protocol_version: 1,
+      client_version: "0.1.0",
+      session_id: "550e8400-e29b-41d4-a716-446655440000"
+    });
+    await manager.handleControl({
+      type: "utterance_start",
+      client_utterance_id: "client-inflight",
+      source: "microphone",
+      speaker: "local",
+      sequence: 3,
+      started_at_ms: 100
+    });
+    await manager.handleControl({
+      type: "utterance_commit",
+      client_utterance_id: "client-inflight",
+      sequence: 3,
+      ended_at_ms: 200
+    });
+    await manager.handleRealtimeEvent({
+      type: "input_audio_buffer.committed",
+      item_id: "item-inflight"
+    });
+    const completion = manager.handleRealtimeEvent({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "item-inflight",
+      transcript: "Complete this later"
+    });
+
+    manager.handleRealtimeFailure("microphone", {
+      source: "microphone",
+      code: "openai_realtime_error",
+      message: "Realtime socket failed.",
+      interruptedUtterance: false
+    });
+    deferred.resolve(makeOverlayResult("item-inflight", "Complete this later"));
+    await completion;
+
+    expect(messages.some((message) => (message as { type: string }).type === "overlay_result")).toBe(false);
+  });
+
   it("rejects system audio start safely in P0 mode", async () => {
     const messages: unknown[] = [];
     const manager = new ClientSessionManager({
       mockMode: false,
       overlayResponseClient: new MockOpenAIResponsesClient(),
-      send: (message) => messages.push(message)
+      send: (message) => {
+        messages.push(message);
+      }
     });
 
     await manager.handleControl({
@@ -397,7 +681,9 @@ describe("ClientSessionManager", () => {
     const manager = new ClientSessionManager({
       mockMode: false,
       overlayResponseClient: overlayClient,
-      send: (message) => messages.push(message)
+      send: (message) => {
+        messages.push(message);
+      }
     });
 
     manager.handleControl({
@@ -486,6 +772,23 @@ class RecordingOverlayResponseClient {
   createOverlayResult(envelope: FinalUtteranceEnvelope): Promise<OverlayResult> {
     this.envelopes.push(envelope);
     return this.responses.shift() ?? Promise.resolve(makeOverlayResult(envelope.utterance_id, envelope.source_text));
+  }
+}
+
+class DeferredOverlayResponse {
+  readonly envelopes: FinalUtteranceEnvelope[] = [];
+  private resolver: ((result: OverlayResult) => void) | undefined;
+  readonly promise = new Promise<OverlayResult>((resolve) => {
+    this.resolver = resolve;
+  });
+
+  createOverlayResult(envelope: FinalUtteranceEnvelope): Promise<OverlayResult> {
+    this.envelopes.push(envelope);
+    return this.promise;
+  }
+
+  resolve(result: OverlayResult): void {
+    this.resolver?.(result);
   }
 }
 

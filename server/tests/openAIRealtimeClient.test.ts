@@ -171,8 +171,35 @@ describe("OpenAIRealtimeTranscriptionClient", () => {
     expect(unexpectedDisconnects).toBe(1);
   });
 
-  it("handles malformed JSON and OpenAI error events explicitly", () => {
+  it("treats OpenAI error events as terminal and uses safe messages", () => {
     const socket = new FakeRealtimeSocket();
+    const errors: string[] = [];
+    const terminalFailures: string[] = [];
+    new OpenAIRealtimeTranscriptionClient({
+      apiKey: "test-key",
+      model: "gpt-realtime-whisper",
+      delay: "low",
+      source: "microphone",
+      languageHint: null,
+      socketFactory: () => socket,
+      onEvent: () => {},
+      onError: (error) => errors.push(error.message),
+      onDisconnect: () => {},
+      onTerminalFailure: (failure) => terminalFailures.push(failure.code)
+    });
+
+    socket.message({
+      type: "error",
+      error: { message: "input audio format rejected" }
+    });
+
+    expect(errors).toEqual(["input audio format rejected"]);
+    expect(terminalFailures).toEqual(["openai_realtime_error"]);
+  });
+
+  it("treats malformed JSON as terminal for the current Realtime session", () => {
+    const socket = new FakeRealtimeSocket();
+    const terminalFailures: string[] = [];
     const errors: string[] = [];
     new OpenAIRealtimeTranscriptionClient({
       apiKey: "test-key",
@@ -183,17 +210,74 @@ describe("OpenAIRealtimeTranscriptionClient", () => {
       socketFactory: () => socket,
       onEvent: () => {},
       onError: (error) => errors.push(error.message),
-      onDisconnect: () => {}
+      onDisconnect: () => terminalFailures.push("disconnect"),
+      onTerminalFailure: (failure) => terminalFailures.push(failure.code)
     });
 
     socket.messageRaw("{");
-    socket.message({
-      type: "error",
-      error: { message: "input audio format rejected" }
+    socket.closeFromServer();
+
+    expect(errors[0]).toContain("Malformed Realtime message");
+    expect(terminalFailures).toEqual(["openai_realtime_malformed_event"]);
+    expect(socket.closed).toBe(true);
+  });
+
+  it("treats send failure during queued flush as terminal without dropping unsent events first", () => {
+    const socket = new FakeRealtimeSocket();
+    const terminalFailures: string[] = [];
+    const errors: string[] = [];
+    const client = new OpenAIRealtimeTranscriptionClient({
+      apiKey: "test-key",
+      model: "gpt-realtime-whisper",
+      delay: "low",
+      source: "microphone",
+      languageHint: null,
+      socketFactory: () => socket,
+      onEvent: () => {},
+      onError: (error) => errors.push(error.message),
+      onDisconnect: () => terminalFailures.push("disconnect"),
+      onTerminalFailure: (failure) => terminalFailures.push(failure.code)
     });
 
-    expect(errors[0]).toContain("JSON");
-    expect(errors[1]).toBe("input audio format rejected");
+    client.appendAudio(Buffer.from([1]));
+    client.commit();
+    socket.open();
+    socket.throwOnSendType = "input_audio_buffer.append";
+
+    expect(() => socket.message({ type: "session.updated" })).not.toThrow();
+
+    expect(errors).toEqual(["Realtime socket send failed."]);
+    expect(terminalFailures).toEqual(["openai_realtime_send_failed"]);
+    expect(socket.closed).toBe(true);
+    expect(socket.sent.map((value) => value.type)).toEqual(["session.update"]);
+  });
+
+  it("treats send failure during ordinary append as terminal once", () => {
+    const socket = new FakeRealtimeSocket();
+    const terminalFailures: string[] = [];
+    const errors: string[] = [];
+    const client = new OpenAIRealtimeTranscriptionClient({
+      apiKey: "test-key",
+      model: "gpt-realtime-whisper",
+      delay: "low",
+      source: "microphone",
+      languageHint: null,
+      socketFactory: () => socket,
+      onEvent: () => {},
+      onError: (error) => errors.push(error.message),
+      onDisconnect: () => terminalFailures.push("disconnect"),
+      onTerminalFailure: (failure) => terminalFailures.push(failure.code)
+    });
+
+    socket.open();
+    socket.message({ type: "session.updated" });
+    socket.throwOnSendType = "input_audio_buffer.append";
+
+    expect(() => client.appendAudio(Buffer.from([1, 2]))).not.toThrow();
+    socket.closeFromServer();
+
+    expect(errors).toEqual(["Realtime socket send failed."]);
+    expect(terminalFailures).toEqual(["openai_realtime_send_failed"]);
   });
 });
 
@@ -201,9 +285,14 @@ class FakeRealtimeSocket extends EventEmitter implements RealtimeSocket {
   readyState = 0;
   sent: Array<Record<string, unknown>> = [];
   closed = false;
+  throwOnSendType: string | undefined;
 
   send(data: string): void {
-    this.sent.push(JSON.parse(data) as Record<string, unknown>);
+    const parsed = JSON.parse(data) as Record<string, unknown>;
+    if (parsed.type === this.throwOnSendType) {
+      throw new Error("boom");
+    }
+    this.sent.push(parsed);
   }
 
   close(): void {

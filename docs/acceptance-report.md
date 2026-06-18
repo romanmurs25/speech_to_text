@@ -99,7 +99,7 @@ Note: one early backend validation attempt ran `npm ci` in parallel with `typech
 - System audio capture is unavailable in the P0 microphone build.
 - Clean Share is unavailable in the P0 microphone build.
 - True simultaneous local and remote audio overlap is unsupported by the current single active binary-frame routing model.
-- WebSocket reconnect, sleep/wake recovery, audio-device disconnect recovery, and permission-denied UX need physical Mac verification and additional implementation.
+- Explicit restart after terminal WebSocket failure, sleep/wake behavior, audio-device disconnect recovery, and permission-denied UX need physical Mac verification and additional implementation.
 
 ## Security Review
 
@@ -138,7 +138,7 @@ Current P0 implementation is unavailable by design. It does not create an `SCCon
 | Real microphone testing | PARTIAL: capture code exists and package compiles; requires physical Mac permission test and real backend. |
 | Real system audio testing | NOT READY: system audio is explicitly unavailable in P0. |
 | Clean Share testing | NOT READY: Clean Share is explicitly unavailable in P0. |
-| Production use | NOT READY: macOS runtime behavior, Clean Share, system audio, reconnect, sleep/wake, and manual privacy behavior are unverified/incomplete. |
+| Production use | NOT READY: macOS runtime behavior, Clean Share, system audio, terminal-failure restart UX, sleep/wake, and manual privacy behavior are unverified/incomplete. |
 
 ## Next Command For A Physical Mac
 

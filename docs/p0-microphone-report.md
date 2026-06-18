@@ -106,7 +106,7 @@ Report date: 2026-06-18
 - Real system audio capture with ScreenCaptureKit audio output.
 - True simultaneous local/remote multiplexing. The protocol needs stream/source tagging for binary frames before this is safe.
 - Real Clean Share with `SCContentFilter`, `SCStream`, output handling, frame rendering, and manual privacy validation.
-- Production WSS deployment, notarization, packaging, reconnect UX, sleep/wake hardening, and device-disconnect hardening.
+- Production WSS deployment, notarization, packaging, terminal-failure restart UX, sleep/wake hardening, and device-disconnect hardening.
 
 ## Final Validation
 

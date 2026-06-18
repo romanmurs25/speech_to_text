@@ -5,7 +5,8 @@ export type UtteranceLifecycle =
   | "commitRequested"
   | "correlated"
   | "completed"
-  | "cancelled";
+  | "cancelled"
+  | "abandoned";
 
 export interface PendingUtterance {
   clientUtteranceId: string;
@@ -32,10 +33,14 @@ interface UtteranceRecord extends PendingUtterance {
 export type EnqueueResult = "enqueued" | "duplicate" | "conflict";
 export type CommitRequestResult =
   | { ok: true; utterance: PendingUtterance; duplicate: boolean }
-  | { ok: false; code: "not_found" | "cancelled" | "already_committed" | "conflict" };
+  | { ok: false; code: "not_found" | "cancelled" | "abandoned" | "already_committed" | "conflict" };
 export type CancelResult =
   | { ok: true; utterance: PendingUtterance; duplicate: boolean }
   | { ok: false; code: "not_found" | "already_committed" | "conflict" };
+export interface ClearUnfinishedResult {
+  cancelled: PendingUtterance[];
+  abandoned: PendingUtterance[];
+}
 
 export class UtteranceCorrelationStore {
   private readonly records = new Map<string, UtteranceRecord>();
@@ -61,18 +66,32 @@ export class UtteranceCorrelationStore {
     return "enqueued";
   }
 
-  requestCommit(clientUtteranceId: string, endedAtMs: number): CommitRequestResult {
+  requestCommit(
+    clientUtteranceId: string,
+    expectedSequence: number,
+    endedAtMs: number
+  ): CommitRequestResult {
     const record = this.records.get(clientUtteranceId);
     if (!record) {
       return { ok: false, code: "not_found" };
+    }
+
+    if (record.sequence !== expectedSequence) {
+      return { ok: false, code: "conflict" };
     }
 
     if (record.lifecycle === "cancelled") {
       return { ok: false, code: "cancelled" };
     }
 
+    if (record.lifecycle === "abandoned") {
+      return { ok: false, code: "abandoned" };
+    }
+
     if (record.lifecycle === "commitRequested") {
-      record.endedAtMs = endedAtMs;
+      if (record.endedAtMs !== endedAtMs) {
+        return { ok: false, code: "conflict" };
+      }
       return { ok: true, utterance: asPending(record), duplicate: true };
     }
 
@@ -111,7 +130,8 @@ export class UtteranceCorrelationStore {
     if (
       record.lifecycle === "commitRequested" ||
       record.lifecycle === "correlated" ||
-      record.lifecycle === "completed"
+      record.lifecycle === "completed" ||
+      record.lifecycle === "abandoned"
     ) {
       return { ok: false, code: "already_committed" };
     }
@@ -146,7 +166,7 @@ export class UtteranceCorrelationStore {
 
   getByOpenAIItemId(openAIItemId: string): CorrelatedUtterance | undefined {
     const record = this.byItemId.get(openAIItemId);
-    if (!record || record.lifecycle === "cancelled") {
+    if (!record || record.lifecycle === "cancelled" || record.lifecycle === "abandoned") {
       return undefined;
     }
     return asCorrelated(record);
@@ -170,20 +190,37 @@ export class UtteranceCorrelationStore {
   }
 
   clearUncommittedForSource(source: Source, reason: UtteranceCancelReason): PendingUtterance[] {
+    return this.clearUnfinishedForSource(source, reason).cancelled;
+  }
+
+  clearUnfinishedForSource(source: Source, reason: UtteranceCancelReason): ClearUnfinishedResult {
     const cancelled: PendingUtterance[] = [];
+    const abandoned: PendingUtterance[] = [];
     for (const record of this.records.values()) {
-      if (
-        record.source === source &&
-        (record.lifecycle === "active" || record.lifecycle === "commitRequested")
-      ) {
+      if (record.source !== source) {
+        continue;
+      }
+
+      if (record.lifecycle === "active") {
         record.lifecycle = "cancelled";
         record.cancelReason = reason;
         this.removeFromCommitQueue(record.clientUtteranceId);
         this.rememberFinished(record.clientUtteranceId);
         cancelled.push(asPending(record));
+        continue;
+      }
+
+      if (record.lifecycle === "commitRequested" || record.lifecycle === "correlated") {
+        record.lifecycle = "abandoned";
+        this.removeFromCommitQueue(record.clientUtteranceId);
+        if (record.openAIItemId) {
+          this.byItemId.delete(record.openAIItemId);
+        }
+        this.rememberFinished(record.clientUtteranceId);
+        abandoned.push(asPending(record));
       }
     }
-    return cancelled;
+    return { cancelled, abandoned };
   }
 
   private removeFromCommitQueue(clientUtteranceId: string): void {

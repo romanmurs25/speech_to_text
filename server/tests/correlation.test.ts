@@ -60,4 +60,62 @@ describe("utterance correlation", () => {
     expect(store.complete("item-a", "first")?.transcript).toBe("first");
     expect(store.complete("item-a", "duplicate")).toBeNull();
   });
+
+  it("rejects commit sequence mismatches and conflicting duplicate commit metadata", () => {
+    const store = new UtteranceCorrelationStore();
+    store.enqueue({
+      clientUtteranceId: "client-a",
+      sequence: 3,
+      source: "microphone",
+      speaker: "local",
+      startedAtMs: 100
+    });
+
+    expect(store.requestCommit("client-a", 4, 200)).toEqual({
+      ok: false,
+      code: "conflict"
+    });
+    expect(store.requestCommit("client-a", 3, 200)).toMatchObject({
+      ok: true,
+      duplicate: false
+    });
+    expect(store.requestCommit("client-a", 3, 200)).toMatchObject({
+      ok: true,
+      duplicate: true
+    });
+    expect(store.requestCommit("client-a", 3, 225)).toEqual({
+      ok: false,
+      code: "conflict"
+    });
+  });
+
+  it("abandons commit-requested utterances on session termination and ignores late OpenAI events", () => {
+    const store = new UtteranceCorrelationStore();
+    store.enqueue({
+      clientUtteranceId: "client-a",
+      sequence: 1,
+      source: "microphone",
+      speaker: "local",
+      startedAtMs: 100
+    });
+    store.enqueue({
+      clientUtteranceId: "client-b",
+      sequence: 2,
+      source: "microphone",
+      speaker: "local",
+      startedAtMs: 200
+    });
+
+    expect(store.requestCommit("client-a", 1, 150)).toMatchObject({ ok: true });
+    const result = store.clearUnfinishedForSource("microphone", "capture_interrupted");
+
+    expect(result.cancelled.map((utterance) => utterance.clientUtteranceId)).toEqual(["client-b"]);
+    expect(result.abandoned.map((utterance) => utterance.clientUtteranceId)).toEqual(["client-a"]);
+    expect(store.markCommitted("late-item")).toBeNull();
+    expect(store.complete("late-item", "late transcript")).toBeNull();
+    expect(store.requestCommit("client-a", 1, 150)).toEqual({
+      ok: false,
+      code: "abandoned"
+    });
+  });
 });

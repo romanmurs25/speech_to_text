@@ -25,21 +25,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.applicationDidFinishLaunching()
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        Task {
-            await controller.shutdown()
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        controller.prepareForTermination()
+        Task { [controller, weak sender] in
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    await controller.shutdownForTermination()
+                }
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                }
+                await group.next()
+                group.cancelAll()
+            }
+            await MainActor.run {
+                sender?.reply(toApplicationShouldTerminate: true)
+            }
         }
+        return .terminateLater
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        controller.prepareForTermination()
     }
 }
 
 struct ControlPanelView: View {
     @ObservedObject var controller: ApplicationController
-
-    private var controlsLocked: Bool {
-        controller.runState == .connecting ||
-            controller.runState == .listening ||
-            controller.runState == .stopping
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -52,7 +64,7 @@ struct ControlPanelView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .disabled(controlsLocked)
+            .disabled(controller.controlsLocked)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Backend WebSocket URL")
@@ -60,7 +72,7 @@ struct ControlPanelView: View {
                     .foregroundStyle(.secondary)
                 TextField("ws://127.0.0.1:8787/ws", text: $controller.backendURLString)
                     .textFieldStyle(.roundedBorder)
-                    .disabled(controller.mode == .localMock || controlsLocked)
+                    .disabled(controller.mode == .localMock || controller.controlsLocked)
             }
 
             HStack {
@@ -78,14 +90,14 @@ struct ControlPanelView: View {
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(controlsLocked)
+                .disabled(!controller.canStartListening)
 
                 Button("Stop Listening") {
                     Task {
                         await controller.stopListening()
                     }
                 }
-                .disabled(controller.runState == .idle || controller.runState == .stopping)
+                .disabled(!controller.canStopListening)
 
                 Spacer()
 

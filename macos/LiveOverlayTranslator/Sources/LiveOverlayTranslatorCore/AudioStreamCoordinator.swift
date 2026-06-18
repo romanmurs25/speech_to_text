@@ -48,6 +48,7 @@ public actor AudioStreamCoordinator {
     private let detector: SpeechEndpointDetector
     private let websocket: BackendWebSocketClient
     private let chunker: PCMFrameChunker
+    private let invalidationToken: SessionInvalidationToken?
     private var sequence = 0
     private var activeUtteranceID: String?
     private var activeSource: AudioSource?
@@ -55,26 +56,38 @@ public actor AudioStreamCoordinator {
     public init(
         detector: SpeechEndpointDetector,
         websocket: BackendWebSocketClient,
-        streamSettings: AudioStreamSettings = AudioStreamSettings()
+        streamSettings: AudioStreamSettings = AudioStreamSettings(),
+        invalidationToken: SessionInvalidationToken? = nil
     ) {
         self.detector = detector
         self.websocket = websocket
         self.chunker = PCMFrameChunker(settings: streamSettings)
+        self.invalidationToken = invalidationToken
     }
 
     public func start(sessionID: UUID, clientVersion: String = "0.1.0", source: AudioSource) async throws {
+        try await throwIfInvalidated()
         try await websocket.connect()
+        try await throwIfInvalidated()
         try await websocket.send(.hello(HelloMessage(
             protocolVersion: 1,
             clientVersion: clientVersion,
             sessionID: sessionID
         )))
+        try await throwIfInvalidated()
         try await websocket.send(.startStream(StartStreamMessage(source: source)))
+        try await throwIfInvalidated()
     }
 
     public func process(_ chunk: AudioChunk) async throws {
+        if await cancelIfInvalidated() {
+            return
+        }
         let events = detector.process(samples: chunk.pcmSamples, timestampMs: chunk.timestampMs)
         for event in events {
+            if await cancelIfInvalidated() {
+                return
+            }
             switch event {
             case let .speechStarted(startedAtMs, initialSamples):
                 guard activeUtteranceID == nil else { continue }
@@ -89,6 +102,9 @@ public actor AudioStreamCoordinator {
                     sequence: sequence,
                     startedAtMs: startedAtMs
                 )))
+                if await cancelIfInvalidated() {
+                    return
+                }
                 try await sendSamples(initialSamples)
 
             case let .speechSamples(samples):
@@ -97,6 +113,9 @@ public actor AudioStreamCoordinator {
 
             case let .speechEnded(endedAtMs):
                 guard let activeUtteranceID else { continue }
+                if await cancelIfInvalidated() {
+                    return
+                }
                 try await websocket.send(.utteranceCommit(UtteranceCommitMessage(
                     clientUtteranceID: activeUtteranceID,
                     sequence: sequence,
@@ -104,6 +123,7 @@ public actor AudioStreamCoordinator {
                 )))
                 self.activeUtteranceID = nil
                 self.activeSource = nil
+                try await throwIfInvalidated()
 
             case .utteranceDiscarded:
                 try await cancelActiveUtterance(reason: .minimumSpeechDurationNotMet)
@@ -153,7 +173,26 @@ public actor AudioStreamCoordinator {
 
     private func sendSamples(_ samples: [Int16]) async throws {
         for frame in chunker.frames(from: samples) {
+            if await cancelIfInvalidated() {
+                return
+            }
             try await websocket.sendAudio(frame)
+            try await throwIfInvalidated()
+        }
+    }
+
+    private func cancelIfInvalidated() async -> Bool {
+        guard invalidationToken?.isInvalidated == true else {
+            return false
+        }
+        let reason = invalidationToken?.invalidationReason?.utteranceCancelReason ?? .captureInterrupted
+        try? await cancelActiveUtterance(reason: reason)
+        return true
+    }
+
+    private func throwIfInvalidated() async throws {
+        if await cancelIfInvalidated() {
+            throw BackendWebSocketClient.ClientError.cancelled
         }
     }
 }

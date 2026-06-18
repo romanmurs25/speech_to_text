@@ -14,6 +14,7 @@ import {
   isOversizedAudioFrame,
   isOversizedControlMessage
 } from "./ws/messageLimits.js";
+import { safeClose, safeSend } from "./ws/safeWebSocket.js";
 
 export async function createApp(config: ServerConfig = loadConfig()) {
   const openAIApiKey = config.openAIApiKey?.trim();
@@ -56,11 +57,21 @@ export async function createApp(config: ServerConfig = loadConfig()) {
   });
 
   wss.on("connection", (ws: WebSocket) => {
+    let managerClosed = false;
+    const closeManagerOnce = () => {
+      if (managerClosed) {
+        return;
+      }
+      managerClosed = true;
+      manager.close();
+    };
     const manager = new ClientSessionManager({
       mockMode: config.mockOpenAI,
       overlayResponseClient,
-      send: (message) => ws.send(JSON.stringify(message)),
-      terminate: () => ws.close(1008, "ambiguous_audio_routing"),
+      send: (message) => safeSend(ws, message, logger),
+      terminate: () => {
+        safeClose(ws, 1008, "session_terminated");
+      },
       realtimeClientFactory: (message) => {
         return new OpenAIRealtimeTranscriptionClient({
           apiKey: openAIApiKey ?? "",
@@ -74,13 +85,11 @@ export async function createApp(config: ServerConfig = loadConfig()) {
                 { event: redactForLog({ error: error instanceof Error ? error.message : String(error) }) },
                 "Realtime event routing error"
               );
-              ws.send(
-                JSON.stringify({
-                  type: "recoverable_error",
-                  code: "realtime_event_routing_failed",
-                  message: "Transcription event routing failed safely."
-                })
-              );
+              safeSend(ws, {
+                type: "recoverable_error",
+                code: "realtime_event_routing_failed",
+                message: "Transcription event routing failed safely."
+              }, logger);
             });
           },
           onError: (error) => {
@@ -99,28 +108,37 @@ export async function createApp(config: ServerConfig = loadConfig()) {
     ws.on("message", (data, isBinary) => {
       if (isBinary) {
         if (isOversizedAudioFrame(data)) {
-          ws.send(
-            JSON.stringify({
-              type: "recoverable_error",
-              code: "audio_frame_too_large",
-              message: "Audio frame exceeded the maximum size."
-            })
-          );
+          safeSend(ws, {
+            type: "recoverable_error",
+            code: "audio_frame_too_large",
+            message: "Audio frame exceeded the maximum size."
+          }, logger);
           return;
         }
-        manager.handleAudio(data);
+        try {
+          manager.handleAudio(data);
+        } catch (error) {
+          logger.warn(
+            { event: redactForLog({ error: error instanceof Error ? error.message : String(error) }) },
+            "Binary audio handling failed"
+          );
+          safeSend(ws, {
+            type: "fatal_error",
+            code: "realtime_session_failed",
+            message: "The transcription session ended and must be restarted."
+          }, logger);
+          safeClose(ws, 1011, "audio_append_failed");
+        }
         return;
       }
 
       if (isOversizedControlMessage(data)) {
-        ws.send(
-          JSON.stringify({
-            type: "fatal_error",
-            code: "message_too_large",
-            message: "Control message exceeded the maximum size."
-          })
-        );
-        ws.close();
+        safeSend(ws, {
+          type: "fatal_error",
+          code: "message_too_large",
+          message: "Control message exceeded the maximum size."
+        }, logger);
+        safeClose(ws);
         return;
       }
 
@@ -128,8 +146,8 @@ export async function createApp(config: ServerConfig = loadConfig()) {
         const parsedJson = JSON.parse(data.toString());
         const parsed = parseClientControlMessage(parsedJson);
         if (!parsed.ok) {
-          ws.send(JSON.stringify({ type: "fatal_error", ...parsed.error }));
-          ws.close();
+          safeSend(ws, { type: "fatal_error", ...parsed.error }, logger);
+          safeClose(ws);
           return;
         }
 
@@ -138,28 +156,24 @@ export async function createApp(config: ServerConfig = loadConfig()) {
             { event: redactForLog({ error: error instanceof Error ? error.message : String(error) }) },
             "Client control handling failed"
           );
-          ws.send(
-            JSON.stringify({
-              type: "fatal_error",
-              code: "internal_control_error",
-              message: "The session entered an unsafe protocol state."
-            })
-          );
-          ws.close(1011, "internal_control_error");
+          safeSend(ws, {
+            type: "fatal_error",
+            code: "internal_control_error",
+            message: "The session entered an unsafe protocol state."
+          }, logger);
+          safeClose(ws, 1011, "internal_control_error");
         });
       } catch {
-        ws.send(
-          JSON.stringify({
-            type: "fatal_error",
-            code: "protocol_violation",
-            message: "Malformed client message."
-          })
-        );
-        ws.close();
+        safeSend(ws, {
+          type: "fatal_error",
+          code: "protocol_violation",
+          message: "Malformed client message."
+        }, logger);
+        safeClose(ws);
       }
     });
 
-    ws.on("close", () => manager.close());
+    ws.on("close", closeManagerOnce);
   });
 
   app.addHook("onClose", async () => {

@@ -18,6 +18,12 @@ public protocol AudioCaptureService: AnyObject {
     func stop()
 }
 
+public protocol MicrophoneCaptureServiceProtocol: AnyObject, Sendable {
+    func requestPermission() async throws
+    func startCapture(onChunk: @escaping @Sendable (AudioChunk) -> Void) throws
+    func stop()
+}
+
 public enum AudioCaptureError: Error, Equatable {
     case microphonePermissionDenied
     case screenRecordingPermissionDenied
