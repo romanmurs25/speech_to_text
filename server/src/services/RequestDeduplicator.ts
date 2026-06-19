@@ -3,9 +3,8 @@ export class RequestDeduplicator<T> {
   private readonly inFlight = new Map<string, Promise<T>>();
 
   async run(key: string, operation: () => Promise<T>): Promise<T> {
-    const completed = this.completed.get(key);
-    if (completed) {
-      return completed;
+    if (this.completed.has(key)) {
+      return this.completed.get(key) as T;
     }
 
     const existing = this.inFlight.get(key);

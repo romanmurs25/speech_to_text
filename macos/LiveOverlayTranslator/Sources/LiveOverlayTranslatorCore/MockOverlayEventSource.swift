@@ -6,10 +6,12 @@ public struct MockOverlayEventSource: Sendable {
     public func events() -> AsyncStream<ServerMessage> {
         AsyncStream { continuation in
             let task = Task {
+                guard !Task.isCancelled else { return }
                 continuation.yield(.sessionState(SessionStateMessage(
                     status: .ready,
                     sessionID: UUID(uuidString: "550E8400-E29B-41D4-A716-446655440000")!
                 )))
+                guard !Task.isCancelled else { return }
                 continuation.yield(.transcriptDelta(TranscriptDelta(
                     clientUtteranceID: "mock-client-1",
                     openAIItemID: "mock-item-1",
@@ -19,6 +21,7 @@ public struct MockOverlayEventSource: Sendable {
                     delta: "Could you send"
                 )))
                 try? await Task.sleep(nanoseconds: 450_000_000)
+                guard !Task.isCancelled else { return }
                 continuation.yield(.transcriptDelta(TranscriptDelta(
                     clientUtteranceID: "mock-client-1",
                     openAIItemID: "mock-item-1",
@@ -28,6 +31,7 @@ public struct MockOverlayEventSource: Sendable {
                     delta: " me the revised proposal by Friday?"
                 )))
                 try? await Task.sleep(nanoseconds: 550_000_000)
+                guard !Task.isCancelled else { return }
                 continuation.yield(.transcriptCompleted(TranscriptCompleted(
                     clientUtteranceID: "mock-client-1",
                     openAIItemID: "mock-item-1",
@@ -37,6 +41,7 @@ public struct MockOverlayEventSource: Sendable {
                     transcript: "Could you send me the revised proposal by Friday?"
                 )))
                 try? await Task.sleep(nanoseconds: 700_000_000)
+                guard !Task.isCancelled else { return }
                 continuation.yield(.overlayResult(OverlayResultMessage(
                     clientUtteranceID: "mock-client-1",
                     sequence: 1,

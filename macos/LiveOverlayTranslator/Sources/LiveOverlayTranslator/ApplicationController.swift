@@ -74,6 +74,12 @@ private enum SessionCleanupOutcome {
 
 @MainActor
 final class ApplicationController: ObservableObject {
+    private final class LocalMockRunContext {
+        let generation = UUID()
+        let invalidationToken = SessionInvalidationToken()
+        var task: Task<Void, Never>?
+    }
+
     private enum DefaultsKey {
         static let mode = "LiveOverlayTranslator.mode"
         static let backendURL = "LiveOverlayTranslator.backendURL"
@@ -100,7 +106,7 @@ final class ApplicationController: ObservableObject {
     private var overlayController: OverlayWindowController?
     private var shortcutController: GlobalShortcutController?
     private let cleanShareCoordinator = CleanShareCoordinator()
-    private var mockTask: Task<Void, Never>?
+    private var currentMock: LocalMockRunContext?
     private var currentSession: BackendMicrophoneSessionContext?
 
     var controlsLocked: Bool {
@@ -113,7 +119,7 @@ final class ApplicationController: ObservableObject {
     }
 
     var canStartListening: Bool {
-        currentSession == nil && mockTask == nil && (runState == .idle || runState == .failed)
+        currentSession == nil && currentMock == nil && (runState == .idle || runState == .failed)
     }
 
     var canStopListening: Bool {
@@ -167,8 +173,11 @@ final class ApplicationController: ObservableObject {
     }
 
     func stopListening() async {
-        mockTask?.cancel()
-        mockTask = nil
+        if let mock = currentMock {
+            mock.invalidationToken.invalidate(reason: .userStop)
+            mock.task?.cancel()
+            currentMock = nil
+        }
         if let context = currentSession {
             await cleanup(context: context, outcome: .userStop, sendStop: true)
         } else {
@@ -182,8 +191,11 @@ final class ApplicationController: ObservableObject {
     }
 
     func prepareForTermination() {
-        mockTask?.cancel()
-        mockTask = nil
+        if let mock = currentMock {
+            mock.invalidationToken.invalidate(reason: .applicationShutdown)
+            mock.task?.cancel()
+            currentMock = nil
+        }
         guard let context = currentSession else { return }
         context.invalidationToken.invalidate(reason: .applicationShutdown)
         context.microphone.stop()
@@ -197,21 +209,39 @@ final class ApplicationController: ObservableObject {
     }
 
     private func startLocalMock() {
-        mockTask?.cancel()
+        currentMock?.task?.cancel()
+        let context = LocalMockRunContext()
+        currentMock = context
         runState = .listening
         microphoneState = .idle
 
-        mockTask = Task { [weak self] in
+        context.task = Task { [weak self, weak context] in
             let source = MockOverlayEventSource()
             for await event in source.events() {
                 if Task.isCancelled { return }
-                self?.handleServerMessage(event)
+                let shouldHandle = await MainActor.run {
+                    guard let self, let context else {
+                        return false
+                    }
+                    return self.isCurrent(context) && !context.invalidationToken.isInvalidated
+                }
+                guard shouldHandle else { return }
+                await MainActor.run {
+                    self?.handleServerMessage(event)
+                }
             }
-            self?.finishLocalMock()
+            await MainActor.run {
+                guard let context else { return }
+                self?.finishLocalMock(context: context)
+            }
         }
     }
 
-    private func finishLocalMock() {
+    private func finishLocalMock(context: LocalMockRunContext) {
+        guard isCurrent(context), !context.invalidationToken.isInvalidated else {
+            return
+        }
+        currentMock = nil
         if runState == .listening {
             runState = .idle
             microphoneState = .stopped
@@ -359,7 +389,19 @@ final class ApplicationController: ObservableObject {
         switch message {
         case let .sessionState(session):
             if session.status == .closed {
-                runState = .idle
+                if let context {
+                    lastError = "Backend session closed."
+                    Task { [weak self, weak context] in
+                        guard let context else { return }
+                        await self?.cleanup(
+                            context: context,
+                            outcome: .terminalFailure("Backend session closed."),
+                            sendStop: false
+                        )
+                    }
+                } else {
+                    runState = .idle
+                }
             }
 
         case let .recoverableError(error):
@@ -477,6 +519,10 @@ final class ApplicationController: ObservableObject {
 
     private func isCurrent(_ context: BackendMicrophoneSessionContext) -> Bool {
         currentSession === context && currentSession?.generation == context.generation
+    }
+
+    private func isCurrent(_ context: LocalMockRunContext) -> Bool {
+        currentMock === context
     }
 
     private func fail(_ message: String) {

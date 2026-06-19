@@ -5,7 +5,11 @@ import {
   type FinalUtteranceEnvelope,
   type OverlayResult
 } from "../protocol/schemas.js";
-import { publicError, type OverlayResponseClient } from "../services/OverlayResponseService.js";
+import {
+  publicError,
+  type OverlayResponseClient,
+  type OverlayResponseOptions
+} from "../services/OverlayResponseService.js";
 
 const SYSTEM_INSTRUCTION = `You are a real-time bilingual conversation assistant.
 
@@ -45,9 +49,18 @@ export class OpenAIResponsesClient implements OverlayResponseClient {
     this.timeoutMs = options.timeoutMs ?? 20_000;
   }
 
-  async createOverlayResult(envelope: FinalUtteranceEnvelope): Promise<OverlayResult> {
+  async createOverlayResult(
+    envelope: FinalUtteranceEnvelope,
+    options?: OverlayResponseOptions
+  ): Promise<OverlayResult> {
     const response = await retryOnce(async () => {
       const abortController = new AbortController();
+      const abortFromSession = () => abortController.abort();
+      if (options?.signal?.aborted) {
+        abortController.abort();
+      } else {
+        options?.signal?.addEventListener("abort", abortFromSession, { once: true });
+      }
       const timer = setTimeout(() => abortController.abort(), this.timeoutMs);
       try {
         return await this.client.responses.parse(
@@ -66,6 +79,7 @@ export class OpenAIResponsesClient implements OverlayResponseClient {
         );
       } finally {
         clearTimeout(timer);
+        options?.signal?.removeEventListener("abort", abortFromSession);
       }
     });
 

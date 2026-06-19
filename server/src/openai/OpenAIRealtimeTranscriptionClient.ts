@@ -62,6 +62,7 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
   private queuedAudioBytes = 0;
   private state: RealtimeClientState = "connecting";
   private terminalNotified = false;
+  private closeRequested = false;
 
   constructor(private readonly options: RealtimeTranscriptionClientOptions) {
     const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(options.model)}`;
@@ -100,11 +101,19 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
   }
 
   close(): void {
-    if (this.state === "disconnected" || this.state === "intentionallyClosing") {
+    if (
+      this.state === "disconnected" ||
+      this.state === "intentionallyClosing" ||
+      (this.state === "failed" && this.closeRequested)
+    ) {
+      return;
+    }
+    if (this.state === "failed") {
+      this.requestSocketClose();
       return;
     }
     this.state = "intentionallyClosing";
-    this.socket.close();
+    this.requestSocketClose();
   }
 
   private configureSession(): void {
@@ -255,12 +264,20 @@ export class OpenAIRealtimeTranscriptionClient implements RealtimeTranscriptionC
         interruptedUtterance: true
       });
     }
-    this.socket.close();
+    this.requestSocketClose();
   }
 
   private clearQueue(): void {
     this.queuedEvents.length = 0;
     this.queuedAudioBytes = 0;
+  }
+
+  private requestSocketClose(): void {
+    if (this.closeRequested) {
+      return;
+    }
+    this.closeRequested = true;
+    this.socket.close();
   }
 }
 

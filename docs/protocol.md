@@ -82,6 +82,8 @@ Binary frames contain raw PCM S16LE audio for the currently active microphone ut
 
 `utterance_commit` is accepted once for an active utterance. The `sequence` must match the accepted `utterance_start`; an identical duplicate commit is idempotent; a duplicate with a different `sequence` or materially different `ended_at_ms` is rejected and never calls OpenAI commit. A commit after cancellation or abandonment produces `utterance_not_committable` and does not call OpenAI commit or Responses.
 
+The macOS client admits commit atomically before sending this message. If audio-pipe overflow or another invalidation wins before commit admission, no `utterance_commit` is sent and the active utterance is cancelled. If commit admission wins first, the session may still terminate, but the utterance is treated as uncertain/abandoned until a final transcript arrives; the client and backend must not claim that a post-admission commit was successfully cancelled.
+
 ### utterance_cancel
 
 ```json
@@ -127,6 +129,8 @@ Cancellation is valid only before an utterance has been committed. The backend c
 ```
 
 `status` is `connected`, `ready`, `degraded`, or `closed`.
+
+`closed` is terminal for the active macOS backend session. The client stops microphone capture, invalidates the audio pipe, disconnects the exact backend WebSocket context, clears current session ownership, enters failed/interrupted state, and requires explicit user restart. A stale `closed` message from an old session must not affect a newer session.
 
 ### transcript_delta
 
@@ -199,7 +203,7 @@ Only this message type may trigger a Responses API request.
 }
 ```
 
-Fatal errors terminate the current WebSocket session. Recoverable errors may clear overlay pending state for the referenced `client_utterance_id`; fatal errors clear all pending overlay state.
+Fatal errors terminate the current WebSocket session. Recoverable errors may clear overlay pending state for the referenced `client_utterance_id`; fatal errors clear all pending overlay state. If a critical server message (`session_state.ready`, `transcript_completed`, `overlay_result`, or `fatal_error`) cannot be delivered because the client socket is gone, backend session work is terminalized and no Responses work continues for that client.
 
 ## Final Utterance Envelope
 
@@ -233,9 +237,13 @@ When a transcript is finalized, the backend builds this envelope before calling 
 
 The backend deduplicates by `session_id` plus `utterance_id`.
 
+Each client WebSocket session owns one abort signal for Responses work. The signal is passed into `OpenAIResponsesClient`, combined with the request timeout, and aborted on client close, client socket error, fatal termination, ambiguous routing, and terminal Realtime failure. Aborted Responses work is removed from the in-flight deduplication map, is not written to the completed cache, and does not emit a late `overlay_result` or translation error after session termination.
+
 ## Ordering Rules
 
 - An utterance lifecycle is `active -> commitRequested -> correlated -> completed`; cancellation moves only pre-commit active utterances to `cancelled`.
+- Overflow before commit admission produces no `utterance_commit`, cancels the active utterance, and terminates the session.
+- Overflow after commit admission does not produce a false cancellation claim. If no final transcript arrives, unfinished work is abandoned and audio is never replayed.
 - A session failure after commit has been requested moves unfinished records to `abandoned`. Abandoned utterances are not replayed, cannot later correlate or complete, and are not described as successfully cancelled.
 - A cancelled utterance cannot later be committed, correlated, completed, translated, or replayed.
 - Deltas update only their matching `client_utterance_id`.
@@ -246,3 +254,5 @@ The backend deduplicates by `session_id` plus `utterance_id`.
 - OpenAI `input_audio_buffer.cleared` is accepted as an internal acknowledgement and does not produce an app-visible server message.
 - Realtime readiness queues are bounded by event count and byte size. Queue overflow is terminal for that Realtime session; late `session.updated` events must not revive it.
 - Realtime socket send failures and malformed Realtime events are terminal for the current session.
+- OpenAI Realtime terminal failure requests underlying socket close at most once, even if terminal callbacks also call `close()`.
+- Client WebSocket `error` and `close` events are idempotent. One client socket error closes only that session and must not stop the Fastify process.

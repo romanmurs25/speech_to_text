@@ -51,7 +51,7 @@ npm run build
 Verified in this workspace on 2026-06-19:
 
 - `npm run typecheck` passed for source and test TypeScript.
-- `npm test` passed: 11 files, 51 tests.
+- `npm test` passed: 11 files, 61 tests.
 - `npm run build` passed.
 
 ## macOS Setup
@@ -133,6 +133,7 @@ For production deployment, use WSS for the backend WebSocket. Plain `ws://127.0.
 ## Current P0 Capabilities
 
 - Explicit Local Mock mode with delayed visual states.
+- Local Mock natural completion clears its run context, so repeated Local Mock runs and Backend-after-Mock startup do not require app restart.
 - Backend mode using `BackendWebSocketClient`.
 - Microphone capture through AVFoundation only after Start Listening.
 - Local endpoint detection with pre-roll, phrase-ending silence, minimum duration, and maximum utterance duration.
@@ -140,10 +141,16 @@ For production deployment, use WSS for the backend WebSocket. Plain `ws://127.0.
 - Swift protocol support for `session_state`, transcript messages, overlay result, `recoverable_error`, and `fatal_error`.
 - Generation-bound macOS Backend microphone session ownership with one resource set per active session.
 - Stop during startup or microphone permission invalidates the session before capture can start.
+- Backend `session_state.closed` is treated as terminal for the exact macOS session context and stops microphone capture during cleanup.
+- Audio overflow versus `utterance_commit` is arbitrated before protocol send admission. Overflow before admission cancels the utterance; overflow after admission abandons/terminates without claiming successful cancellation.
+- App termination stops microphone synchronously and races cleanup against a hard reply-once timeout.
 - Backend Realtime readiness queue for append/commit before `session.updated`.
 - Backend `utterance_cancel` support, OpenAI input-buffer clear, and fail-closed handling for ambiguous overlapping utterances.
 - Backend Realtime readiness queue byte/event overflow as a terminal Realtime-session failure.
 - Backend terminal Realtime failure closes the client WebSocket; the user must explicitly start a new session.
+- Client WebSocket close/error terminalizes backend session work exactly once.
+- In-flight Responses translation work receives a session abort signal and cannot emit late overlay results after session termination.
+- OpenAI Realtime sockets request underlying close at most once.
 - Translation failure preserves completed speech in future dialogue context.
 
 ## Not Ready

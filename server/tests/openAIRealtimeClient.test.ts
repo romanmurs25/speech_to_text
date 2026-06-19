@@ -279,12 +279,63 @@ describe("OpenAIRealtimeTranscriptionClient", () => {
     expect(errors).toEqual(["Realtime socket send failed."]);
     expect(terminalFailures).toEqual(["openai_realtime_send_failed"]);
   });
+
+  it("closes the underlying socket exactly once when terminal callback also closes the client", () => {
+    const socket = new FakeRealtimeSocket();
+    const terminalFailures: string[] = [];
+    let client: OpenAIRealtimeTranscriptionClient;
+    client = new OpenAIRealtimeTranscriptionClient({
+      apiKey: "test-key",
+      model: "gpt-realtime-whisper",
+      delay: "low",
+      source: "microphone",
+      languageHint: null,
+      socketFactory: () => socket,
+      onEvent: () => {},
+      onError: () => {},
+      onDisconnect: () => terminalFailures.push("disconnect"),
+      onTerminalFailure: (failure) => {
+        terminalFailures.push(failure.code);
+        client.close();
+      }
+    });
+
+    socket.emit("error", new Error("socket failed"));
+    socket.closeFromServer();
+
+    expect(terminalFailures).toEqual(["openai_realtime_error"]);
+    expect(socket.closeCalls).toBe(1);
+  });
+
+  it("ordinary intentional close requests the underlying close once without terminal failure", () => {
+    const socket = new FakeRealtimeSocket();
+    const terminalFailures: string[] = [];
+    const client = new OpenAIRealtimeTranscriptionClient({
+      apiKey: "test-key",
+      model: "gpt-realtime-whisper",
+      delay: "low",
+      source: "microphone",
+      languageHint: null,
+      socketFactory: () => socket,
+      onEvent: () => {},
+      onError: () => {},
+      onDisconnect: () => terminalFailures.push("disconnect"),
+      onTerminalFailure: (failure) => terminalFailures.push(failure.code)
+    });
+
+    client.close();
+    client.close();
+
+    expect(socket.closeCalls).toBe(1);
+    expect(terminalFailures).toEqual([]);
+  });
 });
 
 class FakeRealtimeSocket extends EventEmitter implements RealtimeSocket {
   readyState = 0;
   sent: Array<Record<string, unknown>> = [];
   closed = false;
+  closeCalls = 0;
   throwOnSendType: string | undefined;
 
   send(data: string): void {
@@ -296,6 +347,7 @@ class FakeRealtimeSocket extends EventEmitter implements RealtimeSocket {
   }
 
   close(): void {
+    this.closeCalls += 1;
     this.closed = true;
     this.readyState = 3;
     this.emit("close");

@@ -5,8 +5,12 @@ import {
 } from "../protocol/schemas.js";
 import { RequestDeduplicator } from "./RequestDeduplicator.js";
 
+export interface OverlayResponseOptions {
+  signal?: AbortSignal;
+}
+
 export interface OverlayResponseClient {
-  createOverlayResult(envelope: FinalUtteranceEnvelope): Promise<unknown>;
+  createOverlayResult(envelope: FinalUtteranceEnvelope, options?: OverlayResponseOptions): Promise<unknown>;
 }
 
 export interface PublicServiceError {
@@ -19,11 +23,13 @@ export class OverlayResponseService {
 
   constructor(private readonly client: OverlayResponseClient) {}
 
-  async translate(envelope: FinalUtteranceEnvelope): Promise<OverlayResult> {
+  async translate(envelope: FinalUtteranceEnvelope, options?: OverlayResponseOptions): Promise<OverlayResult> {
     const key = `${envelope.session_id}:${envelope.utterance_id}`;
     return this.deduplicator.run(key, async () => {
       try {
-        const raw = await this.client.createOverlayResult(envelope);
+        throwIfAborted(options?.signal);
+        const raw = await this.client.createOverlayResult(envelope, options);
+        throwIfAborted(options?.signal);
         const parsed = OverlayResultSchema.safeParse(raw);
         if (!parsed.success) {
           throw publicError(
@@ -34,6 +40,9 @@ export class OverlayResponseService {
 
         return parsed.data;
       } catch (error) {
+        if (isAbortError(error)) {
+          throw publicError("request_aborted", "Translation request was cancelled.");
+        }
         if (isPublicServiceError(error)) {
           throw error;
         }
@@ -56,5 +65,21 @@ export function isPublicServiceError(error: unknown): error is PublicServiceErro
     "publicMessage" in error &&
     typeof (error as { code: unknown }).code === "string" &&
     typeof (error as { publicMessage: unknown }).publicMessage === "string"
+  );
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) {
+    return;
+  }
+  const error = new Error("aborted");
+  error.name = "AbortError";
+  throw error;
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.name === "AbortError" || error.message.toLowerCase() === "aborted")
   );
 }

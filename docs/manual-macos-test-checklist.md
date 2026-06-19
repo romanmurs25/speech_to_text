@@ -174,6 +174,74 @@ Expected result: one AVAudioEngine tap at a time, one WebSocket at a time, no st
 
 Expected result: normal user stop is idempotent and does not double-clear Realtime input.
 
+## 4J. Repeat Local Mock Then Backend
+
+1. Select `Local Mock`.
+2. Run Local Mock ten times.
+3. After every run, verify Start becomes available again.
+4. Verify no stale transcript or overlay event appears from a previous run.
+5. Switch to `Backend`.
+6. Start Backend microphone mode.
+
+Expected result: every Local Mock run completes, its task/context is cleared, Backend starts without app restart, and Local Mock never requests microphone or backend access.
+
+## 4K. Backend Remote Close While Listening
+
+1. Start Backend microphone mode.
+2. Begin speaking.
+3. Make the backend send `session_state.closed` and close the socket.
+4. Verify the microphone indicator stops immediately.
+5. Verify the AVAudioEngine tap is removed.
+6. Verify the app enters failed/interrupted state.
+7. Verify an explicit new Start creates a fresh session.
+
+Expected result: remote close cleans up the exact active backend context, clears current session ownership, and does not leave microphone capture running.
+
+## 4L. Backend Remote Close During Permission Prompt
+
+1. Remove microphone permission for the app.
+2. Start Backend mode.
+3. Leave the macOS microphone permission prompt open.
+4. Make the backend close the session.
+5. Grant microphone permission.
+
+Expected result: the stale permission success cannot install an input tap or enter listening.
+
+## 4M. Overflow Before Commit Admission
+
+1. Use a development build or harness with a tiny bounded audio pipe.
+2. Trigger audio-pipe overflow before endpoint completion.
+3. Inspect backend diagnostics.
+
+Expected result: zero `utterance_commit`, one pre-commit cancellation, microphone stops, and user must explicitly restart.
+
+## 4N. Overflow After Commit Admission
+
+1. Use a debug transport that suspends commit send after local admission.
+2. Trigger audio-pipe overflow while commit is admitted or in flight.
+3. Inspect backend and app diagnostics.
+
+Expected result: the app does not claim successful cancellation for a post-admission commit. The session terminates, unfinished output is abandoned/uncertain, and audio is not replayed.
+
+## 4O. Client WebSocket Error
+
+1. Connect one client to the backend.
+2. Inject a client WebSocket `error`.
+3. Verify the backend process remains running.
+4. Verify only that session is closed.
+5. Connect a second client.
+
+Expected result: the error is logged safely, `ClientSessionManager.close()` runs exactly once, no send is attempted after close begins, and the second client can connect.
+
+## 4P. Application Termination Deadline
+
+1. Start Backend microphone mode.
+2. Quit the application while listening.
+3. Verify the microphone indicator disappears immediately.
+4. Verify the application replies to macOS termination within the configured deadline, even if backend cleanup is hung.
+
+Expected result: microphone stop and pipe invalidation happen before `terminateLater` returns; cleanup and timeout race through a reply-once gate, so macOS receives exactly one termination reply.
+
 ## 5. Overlay Behavior
 
 1. Launch app in Local Mock mode.

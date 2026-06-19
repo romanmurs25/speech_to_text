@@ -92,4 +92,49 @@ describe("overlay response service", () => {
     await expect(second).resolves.toEqual(result);
     expect(client.createOverlayResult).toHaveBeenCalledTimes(1);
   });
+
+  it("passes the session abort signal to shared in-flight Responses requests", async () => {
+    const abortController = new AbortController();
+    const client = {
+      createOverlayResult: vi.fn().mockResolvedValue(result)
+    };
+    const service = new OverlayResponseService(client);
+
+    await expect(service.translate(envelope, { signal: abortController.signal })).resolves.toEqual(result);
+
+    expect(client.createOverlayResult).toHaveBeenCalledWith(
+      envelope,
+      expect.objectContaining({ signal: abortController.signal })
+    );
+  });
+
+  it("does not cache aborted in-flight Responses work", async () => {
+    const abortController = new AbortController();
+    let resolveResult: (value: OverlayResult) => void = () => {};
+    const client = {
+      createOverlayResult: vi.fn((_envelope: FinalUtteranceEnvelope, options?: { signal?: AbortSignal }) => {
+        return new Promise<OverlayResult>((resolve, reject) => {
+          resolveResult = resolve;
+          options?.signal?.addEventListener("abort", () => {
+            const error = new Error("aborted");
+            error.name = "AbortError";
+            reject(error);
+          }, { once: true });
+        });
+      })
+    };
+    const service = new OverlayResponseService(client);
+
+    const first = service.translate(envelope, { signal: abortController.signal });
+    const second = service.translate(envelope, { signal: abortController.signal });
+    abortController.abort();
+
+    await expect(first).rejects.toMatchObject({ code: "request_aborted" });
+    await expect(second).rejects.toMatchObject({ code: "request_aborted" });
+
+    const third = service.translate(envelope);
+    resolveResult(result);
+    await expect(third).resolves.toEqual(result);
+    expect(client.createOverlayResult).toHaveBeenCalledTimes(2);
+  });
 });

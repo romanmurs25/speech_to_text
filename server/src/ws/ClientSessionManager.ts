@@ -38,20 +38,21 @@ export class ClientSessionManager {
   private terminated = false;
   private closed = false;
   private readonly failedRealtimeSources = new Set<Source>();
+  private readonly responsesAbortController = new AbortController();
 
   constructor(private readonly options: ClientSessionManagerOptions) {
     this.overlayResponses = new OverlayResponseService(options.overlayResponseClient);
   }
 
   async handleControl(message: ClientControlMessage): Promise<void> {
-    if (this.terminated) {
+    if (this.terminated || this.closed) {
       return;
     }
 
     switch (message.type) {
       case "hello":
         this.sessionId = message.session_id;
-        this.send({
+        this.sendCritical({
           type: "session_state",
           status: "ready",
           session_id: message.session_id
@@ -207,7 +208,7 @@ export class ClientSessionManager {
   }
 
   handleAudio(data: RawData | Buffer): void {
-    if (this.terminated || this.options.mockMode || !this.activeClientUtteranceId) {
+    if (this.terminated || this.closed || this.options.mockMode || !this.activeClientUtteranceId) {
       return;
     }
 
@@ -226,7 +227,7 @@ export class ClientSessionManager {
   }
 
   async handleRealtimeEvent(event: Parameters<RealtimeEventRouter["route"]>[0]): Promise<void> {
-    if (this.terminated) {
+    if (this.terminated || this.closed) {
       return;
     }
 
@@ -235,7 +236,12 @@ export class ClientSessionManager {
       return;
     }
 
-    this.send(routed);
+    const delivered = routed.type === "transcript_completed"
+      ? this.sendCritical(routed)
+      : this.send(routed);
+    if (!delivered) {
+      return;
+    }
     if (routed.type === "transcript_completed") {
       await this.createOverlayResult(routed.openai_item_id, routed.transcript);
     }
@@ -251,6 +257,9 @@ export class ClientSessionManager {
   }
 
   handleRealtimeFailure(source: Source, failure: RealtimeTerminalFailure): void {
+    if (this.terminated || this.closed) {
+      return;
+    }
     const client = this.realtimeClients.get(source);
     const hadClient = this.realtimeClients.delete(source);
     const interruptedUtterance =
@@ -283,20 +292,7 @@ export class ClientSessionManager {
   }
 
   close(): void {
-    if (this.closed) {
-      return;
-    }
-    this.closed = true;
-    for (const [source, client] of this.realtimeClients) {
-      const cleared = this.correlation.clearUnfinishedForSource(source, "application_shutdown");
-      if (cleared.cancelled.length > 0) {
-        client.clear();
-      }
-      client.close();
-    }
-    this.realtimeClients.clear();
-    this.activeClientUtteranceId = null;
-    this.activeSource = null;
+    this.terminateSession("client_closed");
   }
 
   private failAmbiguousAudioRouting(): void {
@@ -322,12 +318,65 @@ export class ClientSessionManager {
       return;
     }
     this.terminated = true;
-    this.send({ type: "fatal_error", code, message });
+    this.closed = true;
+    this.abortResponses();
+    this.closeRealtimeClients("capture_interrupted");
+    this.sendEvenWhenClosing({ type: "fatal_error", code, message });
     this.options.terminate?.();
   }
 
   private send(message: ServerMessage): boolean {
+    if (this.closed || this.terminated) {
+      return false;
+    }
     return this.options.send(message) !== false;
+  }
+
+  private sendCritical(message: ServerMessage): boolean {
+    if (this.closed || this.terminated) {
+      return false;
+    }
+    const delivered = this.options.send(message) !== false;
+    if (!delivered) {
+      this.terminateSession("critical_send_failed");
+      return false;
+    }
+    return true;
+  }
+
+  private sendEvenWhenClosing(message: ServerMessage): boolean {
+    return this.options.send(message) !== false;
+  }
+
+  private terminateSession(reason: "client_closed" | "critical_send_failed"): void {
+    if (this.terminated) {
+      this.closed = true;
+      return;
+    }
+    this.closed = true;
+    this.terminated = true;
+    this.abortResponses();
+    this.closeRealtimeClients(reason === "client_closed" ? "application_shutdown" : "capture_interrupted");
+    this.options.terminate?.();
+  }
+
+  private abortResponses(): void {
+    if (!this.responsesAbortController.signal.aborted) {
+      this.responsesAbortController.abort();
+    }
+  }
+
+  private closeRealtimeClients(reason: "application_shutdown" | "capture_interrupted"): void {
+    for (const [source, client] of this.realtimeClients) {
+      const cleared = this.correlation.clearUnfinishedForSource(source, reason);
+      if (cleared.cancelled.length > 0) {
+        client.clear();
+      }
+      client.close();
+    }
+    this.realtimeClients.clear();
+    this.activeClientUtteranceId = null;
+    this.activeSource = null;
   }
 
   private async emitMockCompletion(
@@ -367,7 +416,7 @@ export class ClientSessionManager {
     fallbackEndedAtMs?: number
   ): Promise<void> {
     const correlated = this.correlation.getByOpenAIItemId(openAIItemId);
-    if (this.terminated || !correlated || !this.sessionId) {
+    if (this.terminated || this.closed || !correlated || !this.sessionId) {
       return;
     }
 
@@ -392,8 +441,10 @@ export class ClientSessionManager {
     });
 
     try {
-      const result = await this.overlayResponses.translate(envelope);
-      if (this.terminated) {
+      const result = await this.overlayResponses.translate(envelope, {
+        signal: this.responsesAbortController.signal
+      });
+      if (this.terminated || this.closed || this.responsesAbortController.signal.aborted) {
         return;
       }
       if (result.reply_needed) {
@@ -403,14 +454,18 @@ export class ClientSessionManager {
           sequence: envelope.sequence
         });
       }
-      this.send({
+      this.sendCritical({
         type: "overlay_result",
         client_utterance_id: envelope.client_utterance_id,
         sequence: envelope.sequence,
         result
       });
     } catch (error) {
-      if (this.terminated) {
+      if (
+        this.terminated ||
+        this.closed ||
+        (isPublicServiceError(error) && error.code === "request_aborted")
+      ) {
         return;
       }
       this.send({

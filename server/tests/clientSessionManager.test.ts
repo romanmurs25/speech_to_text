@@ -644,6 +644,181 @@ describe("ClientSessionManager", () => {
     expect(messages.some((message) => (message as { type: string }).type === "overlay_result")).toBe(false);
   });
 
+  it("sets terminal state on close so late control, audio, and Realtime events do nothing", async () => {
+    const messages: unknown[] = [];
+    const overlayClient = new RecordingOverlayResponseClient([
+      Promise.resolve(makeOverlayResult("late-item", "Late transcript"))
+    ]);
+    const realtimeClient = new RecordingRealtimeClient();
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: overlayClient,
+      send: (message) => {
+        messages.push(message);
+      },
+      realtimeClientFactory: () => realtimeClient
+    });
+
+    await manager.handleControl({
+      type: "hello",
+      protocol_version: 1,
+      client_version: "0.1.0",
+      session_id: "550e8400-e29b-41d4-a716-446655440000"
+    });
+    await manager.handleControl({
+      type: "start_stream",
+      source: "microphone",
+      sample_rate: 24000,
+      channels: 1,
+      encoding: "pcm_s16le",
+      language_hint: null
+    });
+    await manager.handleControl({
+      type: "utterance_start",
+      client_utterance_id: "late-client",
+      source: "microphone",
+      speaker: "local",
+      sequence: 9,
+      started_at_ms: 100
+    });
+
+    manager.close();
+    await manager.handleControl({
+      type: "hello",
+      protocol_version: 1,
+      client_version: "0.1.0",
+      session_id: "660e8400-e29b-41d4-a716-446655440000"
+    });
+    manager.handleAudio(Buffer.from([1, 2, 3, 4]));
+    await manager.handleRealtimeEvent({ type: "input_audio_buffer.committed", item_id: "late-item" });
+    await manager.handleRealtimeEvent({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "late-item",
+      transcript: "Late transcript"
+    });
+
+    expect(messages).toEqual([
+      {
+        type: "session_state",
+        status: "ready",
+        session_id: "550e8400-e29b-41d4-a716-446655440000"
+      }
+    ]);
+    expect(overlayClient.envelopes).toHaveLength(0);
+    expect(realtimeClient.appendedBytes).toBe(0);
+    expect(realtimeClient.closes).toBe(1);
+  });
+
+  it("aborts in-flight Responses work on close without sending overlay or translation errors", async () => {
+    const messages: unknown[] = [];
+    const deferred = new AbortAwareDeferredOverlayResponse();
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: deferred,
+      send: (message) => {
+        messages.push(message);
+      }
+    });
+
+    await manager.handleControl({
+      type: "hello",
+      protocol_version: 1,
+      client_version: "0.1.0",
+      session_id: "550e8400-e29b-41d4-a716-446655440000"
+    });
+    await completeRealtimeUtteranceUntilResponse(manager, "client-close-response", 4, "item-close-response");
+
+    const completion = manager.handleRealtimeEvent({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "item-close-response",
+      transcript: "Close while translating"
+    });
+    manager.close();
+    deferred.resolve(makeOverlayResult("item-close-response", "Close while translating"));
+    await completion;
+
+    expect(deferred.signals).toHaveLength(1);
+    expect(deferred.signals[0].aborted).toBe(true);
+    expect(messages.some((message) => (message as { type: string }).type === "overlay_result")).toBe(false);
+    expect(messages).not.toContainEqual({
+      type: "recoverable_error",
+      code: "translation_failed",
+      message: "Translation is temporarily unavailable.",
+      client_utterance_id: "client-close-response"
+    });
+  });
+
+  it("aborts in-flight Responses work on fatal termination", async () => {
+    const messages: unknown[] = [];
+    const deferred = new AbortAwareDeferredOverlayResponse();
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: deferred,
+      send: (message) => {
+        messages.push(message);
+      },
+      terminate: () => {}
+    });
+
+    await manager.handleControl({
+      type: "hello",
+      protocol_version: 1,
+      client_version: "0.1.0",
+      session_id: "550e8400-e29b-41d4-a716-446655440000"
+    });
+    await completeRealtimeUtteranceUntilResponse(manager, "client-fatal-response", 5, "item-fatal-response");
+
+    const completion = manager.handleRealtimeEvent({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "item-fatal-response",
+      transcript: "Fatal while translating"
+    });
+    manager.handleRealtimeFailure("microphone", {
+      source: "microphone",
+      code: "openai_realtime_error",
+      message: "Realtime socket failed.",
+      interruptedUtterance: false
+    });
+    deferred.resolve(makeOverlayResult("item-fatal-response", "Fatal while translating"));
+    await completion;
+
+    expect(deferred.signals).toHaveLength(1);
+    expect(deferred.signals[0].aborted).toBe(true);
+    expect(messages.some((message) => (message as { type: string }).type === "overlay_result")).toBe(false);
+  });
+
+  it("terminalizes the session when a critical ready send fails", async () => {
+    let terminated = 0;
+    const realtimeClient = new RecordingRealtimeClient();
+    const manager = new ClientSessionManager({
+      mockMode: false,
+      overlayResponseClient: new MockOpenAIResponsesClient(),
+      send: () => false,
+      realtimeClientFactory: () => realtimeClient,
+      terminate: () => {
+        terminated += 1;
+      }
+    });
+
+    await manager.handleControl({
+      type: "hello",
+      protocol_version: 1,
+      client_version: "0.1.0",
+      session_id: "550e8400-e29b-41d4-a716-446655440000"
+    });
+    await manager.handleControl({
+      type: "start_stream",
+      source: "microphone",
+      sample_rate: 24000,
+      channels: 1,
+      encoding: "pcm_s16le",
+      language_hint: null
+    });
+
+    expect(terminated).toBe(1);
+    expect(realtimeClient.closes).toBe(0);
+  });
+
   it("rejects system audio start safely in P0 mode", async () => {
     const messages: unknown[] = [];
     const manager = new ClientSessionManager({
@@ -751,6 +926,32 @@ async function completeRealtimeUtterance(
   });
 }
 
+async function completeRealtimeUtteranceUntilResponse(
+  manager: ClientSessionManager,
+  clientUtteranceId: string,
+  sequence: number,
+  itemId: string
+): Promise<void> {
+  await manager.handleControl({
+    type: "utterance_start",
+    client_utterance_id: clientUtteranceId,
+    source: "microphone",
+    speaker: "local",
+    sequence,
+    started_at_ms: sequence * 100
+  });
+  await manager.handleControl({
+    type: "utterance_commit",
+    client_utterance_id: clientUtteranceId,
+    sequence,
+    ended_at_ms: sequence * 100 + 50
+  });
+  await manager.handleRealtimeEvent({
+    type: "input_audio_buffer.committed",
+    item_id: itemId
+  });
+}
+
 function makeOverlayResult(utteranceId: string, text: string): OverlayResult {
   return {
     utterance_id: utteranceId,
@@ -784,6 +985,37 @@ class DeferredOverlayResponse {
 
   createOverlayResult(envelope: FinalUtteranceEnvelope): Promise<OverlayResult> {
     this.envelopes.push(envelope);
+    return this.promise;
+  }
+
+  resolve(result: OverlayResult): void {
+    this.resolver?.(result);
+  }
+}
+
+class AbortAwareDeferredOverlayResponse {
+  readonly envelopes: FinalUtteranceEnvelope[] = [];
+  readonly signals: AbortSignal[] = [];
+  private resolver: ((result: OverlayResult) => void) | undefined;
+  private rejecter: ((error: Error) => void) | undefined;
+  readonly promise = new Promise<OverlayResult>((resolve, reject) => {
+    this.resolver = resolve;
+    this.rejecter = reject;
+  });
+
+  createOverlayResult(
+    envelope: FinalUtteranceEnvelope,
+    options?: { signal?: AbortSignal }
+  ): Promise<OverlayResult> {
+    this.envelopes.push(envelope);
+    if (options?.signal) {
+      this.signals.push(options.signal);
+      options.signal.addEventListener("abort", () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        this.rejecter?.(error);
+      }, { once: true });
+    }
     return this.promise;
   }
 

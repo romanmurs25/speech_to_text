@@ -20,6 +20,7 @@ struct LiveOverlayTranslatorApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = ApplicationController()
+    private let terminationTimeoutNanoseconds: UInt64 = 2_000_000_000
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         controller.applicationDidFinishLaunching()
@@ -27,19 +28,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         controller.prepareForTermination()
-        Task { [controller, weak sender] in
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask {
-                    await controller.shutdownForTermination()
+        let replyGate = TerminationReplyGate()
+        let cleanupTask = Task { [controller, weak sender, replyGate] in
+            await controller.shutdownForTermination()
+            if await replyGate.replyIfNeeded(reason: .cleanupFinished) {
+                await MainActor.run {
+                    sender?.reply(toApplicationShouldTerminate: true)
                 }
-                group.addTask {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                }
-                await group.next()
-                group.cancelAll()
             }
-            await MainActor.run {
-                sender?.reply(toApplicationShouldTerminate: true)
+        }
+        Task { [weak sender, replyGate, cleanupTask, terminationTimeoutNanoseconds] in
+            try? await Task.sleep(nanoseconds: terminationTimeoutNanoseconds)
+            if await replyGate.replyIfNeeded(reason: .timeout) {
+                cleanupTask.cancel()
+                await MainActor.run {
+                    sender?.reply(toApplicationShouldTerminate: true)
+                }
             }
         }
         return .terminateLater

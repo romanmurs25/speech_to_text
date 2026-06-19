@@ -37,20 +37,24 @@ public final class BoundedAudioChunkPipe: @unchecked Sendable {
             lock.unlock()
             return .terminated
         }
-        let result = continuation.yield(chunk)
+        lock.unlock()
 
+        let result = continuation.yield(chunk)
         switch result {
         case .enqueued:
-            lock.unlock()
             return .enqueued
         case .dropped:
-            let shouldNotify = invalidateLocked(reason: .audioPipelineOverflow)
-            lock.unlock()
+            let (continuationToFinish, shouldNotify) = takeForInvalidation(
+                reason: .audioPipelineOverflow,
+                notifyOverflow: true
+            )
+            continuationToFinish?.finish()
             if shouldNotify {
                 onOverflow()
             }
             return .overflowed
         case .terminated:
+            lock.lock()
             isFinished = true
             self.continuation = nil
             lock.unlock()
@@ -71,22 +75,30 @@ public final class BoundedAudioChunkPipe: @unchecked Sendable {
     }
 
     public func invalidate(reason: SessionInvalidationReason) {
-        lock.lock()
-        _ = invalidateLocked(reason: reason)
-        lock.unlock()
+        let (continuationToFinish, _) = takeForInvalidation(reason: reason, notifyOverflow: false)
+        continuationToFinish?.finish()
     }
 
-    private func invalidateLocked(reason: SessionInvalidationReason) -> Bool {
+    private func takeForInvalidation(
+        reason: SessionInvalidationReason,
+        notifyOverflow: Bool
+    ) -> (AsyncStream<AudioChunk>.Continuation?, Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !isFinished else {
+            return (nil, false)
+        }
+
         invalidationToken?.invalidate(reason: reason)
         let continuation = continuation
         isFinished = true
         self.continuation = nil
-        continuation?.finish()
 
-        if reason == .audioPipelineOverflow && !didNotifyOverflow {
+        if notifyOverflow, reason == .audioPipelineOverflow, !didNotifyOverflow {
             didNotifyOverflow = true
-            return true
+            return (continuation, true)
         }
-        return false
+        return (continuation, false)
     }
 }

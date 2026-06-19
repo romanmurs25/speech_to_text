@@ -45,13 +45,37 @@ public struct PCMFrameChunker: Sendable {
 }
 
 public actor AudioStreamCoordinator {
+    private struct ActiveUtterance {
+        let id: String
+        let source: AudioSource
+        let arbiter: SessionCommitArbiter
+    }
+
+    private enum UtteranceLifecycle {
+        case idle
+        case active(ActiveUtterance)
+        case cancelling(ActiveUtterance)
+        case commitAdmitted(ActiveUtterance)
+        case commitInFlight(ActiveUtterance)
+        case committed(ActiveUtterance)
+        case finished
+
+        var canStartNewUtterance: Bool {
+            switch self {
+            case .idle, .finished:
+                return true
+            case .active, .cancelling, .commitAdmitted, .commitInFlight, .committed:
+                return false
+            }
+        }
+    }
+
     private let detector: SpeechEndpointDetector
     private let websocket: BackendWebSocketClient
     private let chunker: PCMFrameChunker
     private let invalidationToken: SessionInvalidationToken?
     private var sequence = 0
-    private var activeUtteranceID: String?
-    private var activeSource: AudioSource?
+    private var utteranceState: UtteranceLifecycle = .idle
 
     public init(
         detector: SpeechEndpointDetector,
@@ -90,11 +114,15 @@ public actor AudioStreamCoordinator {
             }
             switch event {
             case let .speechStarted(startedAtMs, initialSamples):
-                guard activeUtteranceID == nil else { continue }
+                guard utteranceState.canStartNewUtterance else { continue }
                 sequence += 1
                 let utteranceID = UUID().uuidString
-                activeUtteranceID = utteranceID
-                activeSource = chunk.source
+                let active = ActiveUtterance(
+                    id: utteranceID,
+                    source: chunk.source,
+                    arbiter: SessionCommitArbiter()
+                )
+                utteranceState = .active(active)
                 try await websocket.send(.utteranceStart(UtteranceStartMessage(
                     clientUtteranceID: utteranceID,
                     source: chunk.source,
@@ -108,22 +136,30 @@ public actor AudioStreamCoordinator {
                 try await sendSamples(initialSamples)
 
             case let .speechSamples(samples):
-                guard activeUtteranceID != nil else { continue }
+                guard case .active = utteranceState else { continue }
                 try await sendSamples(samples)
 
             case let .speechEnded(endedAtMs):
-                guard let activeUtteranceID else { continue }
+                guard case let .active(active) = utteranceState else { continue }
                 if await cancelIfInvalidated() {
                     return
                 }
+                guard active.arbiter.tryAdmitCommit() else {
+                    return
+                }
+                utteranceState = .commitAdmitted(active)
+                _ = active.arbiter.markCommitSendStarted()
+                utteranceState = .commitInFlight(active)
                 try await websocket.send(.utteranceCommit(UtteranceCommitMessage(
-                    clientUtteranceID: activeUtteranceID,
+                    clientUtteranceID: active.id,
                     sequence: sequence,
                     endedAtMs: endedAtMs
                 )))
-                self.activeUtteranceID = nil
-                self.activeSource = nil
+                _ = active.arbiter.markCommitSendCompleted()
+                utteranceState = .committed(active)
                 try await throwIfInvalidated()
+                _ = active.arbiter.finish()
+                utteranceState = .finished
 
             case .utteranceDiscarded:
                 try await cancelActiveUtterance(reason: .minimumSpeechDurationNotMet)
@@ -133,19 +169,20 @@ public actor AudioStreamCoordinator {
 
     public func cancelActiveUtterance(reason: UtteranceCancelReason) async throws {
         detector.reset()
-        guard let activeUtteranceID else {
-            activeSource = nil
+        guard case let .active(active) = utteranceState else {
             return
         }
 
+        _ = active.arbiter.invalidate(reason: reason.sessionInvalidationReason)
+        utteranceState = .cancelling(active)
         let cancel = UtteranceCancelMessage(
-            clientUtteranceID: activeUtteranceID,
+            clientUtteranceID: active.id,
             sequence: sequence,
             reason: reason
         )
-        self.activeUtteranceID = nil
-        self.activeSource = nil
         try await websocket.send(.utteranceCancel(cancel))
+        _ = active.arbiter.finish()
+        utteranceState = .finished
     }
 
     public func stop(source: AudioSource) async throws {
@@ -164,8 +201,7 @@ public actor AudioStreamCoordinator {
         }
         await websocket.disconnect()
         detector.reset()
-        activeUtteranceID = nil
-        activeSource = nil
+        utteranceState = .idle
         if let firstError {
             throw firstError
         }
@@ -185,14 +221,43 @@ public actor AudioStreamCoordinator {
         guard invalidationToken?.isInvalidated == true else {
             return false
         }
-        let reason = invalidationToken?.invalidationReason?.utteranceCancelReason ?? .captureInterrupted
-        try? await cancelActiveUtterance(reason: reason)
+        let invalidationReason = invalidationToken?.invalidationReason ?? .captureInterrupted
+        switch utteranceState {
+        case let .active(active):
+            _ = active.arbiter.invalidate(reason: invalidationReason)
+            try? await cancelActiveUtterance(reason: invalidationReason.utteranceCancelReason)
+        case let .commitAdmitted(active), let .commitInFlight(active), let .committed(active):
+            _ = active.arbiter.invalidate(reason: invalidationReason)
+            _ = active.arbiter.finish()
+            utteranceState = .finished
+        case let .cancelling(active):
+            _ = active.arbiter.invalidate(reason: invalidationReason)
+        case .idle, .finished:
+            break
+        }
         return true
     }
 
     private func throwIfInvalidated() async throws {
         if await cancelIfInvalidated() {
             throw BackendWebSocketClient.ClientError.cancelled
+        }
+    }
+}
+
+private extension UtteranceCancelReason {
+    var sessionInvalidationReason: SessionInvalidationReason {
+        switch self {
+        case .minimumSpeechDurationNotMet:
+            return .captureInterrupted
+        case .audioPipelineOverflow:
+            return .audioPipelineOverflow
+        case .captureInterrupted:
+            return .captureInterrupted
+        case .userInterrupted:
+            return .userStop
+        case .applicationShutdown:
+            return .applicationShutdown
         }
     }
 }
